@@ -1,9 +1,11 @@
 package ocppserver
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -65,8 +67,10 @@ func NewCentralSystemHandler() *CentralSystemHandler {
 	return &CentralSystemHandler{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				return true
+				return true // Tillad forbindelser fra alle origins
 			},
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
 		},
 		clients: make(map[string]*websocket.Conn),
 	}
@@ -80,8 +84,16 @@ func (cs *CentralSystemHandler) HandleWebSocket(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Få chargePointID fra URL eller header
-	chargePointID := r.URL.Path[1:] // Fjern den indledende '/'
+	// Få chargePointID direkte fra URL path
+	// Format: localhost:9000/{id}
+	chargePointID := strings.TrimPrefix(r.URL.Path, "/")
+
+	// Håndter tilfælde hvor der kunne være flere skråstreger
+	if strings.Contains(chargePointID, "/") {
+		parts := strings.Split(chargePointID, "/")
+		chargePointID = parts[0] // Tag kun den første del
+	}
+
 	if chargePointID == "" {
 		chargePointID = "unknown"
 	}
@@ -90,8 +102,22 @@ func (cs *CentralSystemHandler) HandleWebSocket(w http.ResponseWriter, r *http.R
 	cs.clients[chargePointID] = conn
 	log.Printf("New connection from %s", chargePointID)
 
-	// Håndter indgående beskeder
-	go cs.handleMessages(chargePointID, conn)
+	// Håndter indgående beskeder - sørg for at chargePointID ikke indeholder '/'
+	sanitizedID := chargePointID
+	go cs.handleMessages(sanitizedID, conn)
+}
+
+// handleAuthorizeRequest håndterer en Authorize-anmodning
+func (cs *CentralSystemHandler) handleAuthorizeRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	idTag, _ := payload["idTag"].(string)
+	fmt.Printf("Authorize request from %s: idTag=%s\n", chargePointID, idTag)
+
+	// Opret svar
+	return map[string]interface{}{
+		"idTagInfo": map[string]interface{}{
+			"status": "Accepted",
+		},
+	}
 }
 
 // handleMessages håndterer beskeder fra en ladestation
@@ -110,67 +136,179 @@ func (cs *CentralSystemHandler) handleMessages(chargePointID string, conn *webso
 			break
 		}
 
-		// Parse og håndter besked
+		// Parse OCPP besked
 		log.Printf("Received message from %s: %s", chargePointID, message)
 
-		// Håndter forskellige beskedtyper baseret på indhold
-		// Dette er meget forenklet; en rigtig implementation ville
-		// parse JSON-beskederne og validere dem
-		if string(message) == BootNotificationMsg {
-			cs.handleBootNotification(chargePointID, conn)
-		} else if string(message) == HeartbeatMsg {
-			cs.handleHeartbeat(chargePointID, conn)
-		} else if string(message) == AuthorizeMsg {
-			cs.handleAuthorize(chargePointID, conn)
+		// Forsøg at parse JSON-arrayet [MessageTypeId, UniqueId, Action, Payload]
+		var ocppMsg []interface{}
+		if err := json.Unmarshal(message, &ocppMsg); err != nil {
+			log.Printf("Error parsing OCPP message: %v", err)
+			continue
+		}
+
+		// Check at beskeden har det forventede format
+		if len(ocppMsg) < 3 {
+			log.Printf("Invalid OCPP message format: %s", message)
+			continue
+		}
+
+		// Beskedtypen (2 = Request, 3 = Response, 4 = Error)
+		msgTypeID, ok := ocppMsg[0].(float64)
+		if !ok {
+			log.Printf("Invalid message type ID: %v", ocppMsg[0])
+			continue
+		}
+
+		// Beskedens unikke ID
+		uniqueID, ok := ocppMsg[1].(string)
+		if !ok {
+			log.Printf("Invalid unique ID: %v", ocppMsg[1])
+			continue
+		}
+
+		// Hvis det er en anmodning (msgTypeID == 2)
+		if msgTypeID == 2 {
+			action, ok := ocppMsg[2].(string)
+			if !ok {
+				log.Printf("Invalid action: %v", ocppMsg[2])
+				continue
+			}
+
+			// Håndter de forskellige action typer
+			var payload map[string]interface{}
+			var response interface{}
+
+			if len(ocppMsg) > 3 {
+				payload, ok = ocppMsg[3].(map[string]interface{})
+				if !ok {
+					log.Printf("Invalid payload format: %v", ocppMsg[3])
+					continue
+				}
+			}
+
+			switch action {
+			case "BootNotification":
+				response = cs.handleBootNotificationRequest(chargePointID, payload)
+			case "Heartbeat":
+				response = cs.handleHeartbeatRequest(chargePointID)
+			case "Authorize":
+				response = cs.handleAuthorizeRequest(chargePointID, payload)
+			case "StatusNotification":
+				response = cs.handleStatusNotificationRequest(chargePointID, payload)
+			case "StartTransaction":
+				response = cs.handleStartTransactionRequest(chargePointID, payload)
+			case "StopTransaction":
+				response = cs.handleStopTransactionRequest(chargePointID, payload)
+			case "MeterValues":
+				response = cs.handleMeterValuesRequest(chargePointID, payload)
+			default:
+				log.Printf("Unsupported action: %s", action)
+				response = map[string]interface{}{} // Send tomt svar for ukendte handlinger
+			}
+
+			// Send svar tilbage (CallResult)
+			callResult := []interface{}{3, uniqueID, response} // 3 = CallResult
+			if err := conn.WriteJSON(callResult); err != nil {
+				log.Printf("Error sending response: %v", err)
+			} else {
+				log.Printf("Sent response for %s: %+v", action, response)
+			}
+		} else {
+			log.Printf("Received non-request message type: %v", msgTypeID)
 		}
 	}
 }
 
-// handleBootNotification håndterer BootNotification
-func (cs *CentralSystemHandler) handleBootNotification(chargePointID string, conn *websocket.Conn) {
-	fmt.Printf("BootNotification from %s\n", chargePointID)
+// handleBootNotificationRequest håndterer en BootNotification-anmodning
+func (cs *CentralSystemHandler) handleBootNotificationRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	// Log indkommende data
+	chargePointModel, _ := payload["chargePointModel"].(string)
+	chargePointVendor, _ := payload["chargePointVendor"].(string)
+
+	fmt.Printf("BootNotification from %s: Model=%s, Vendor=%s\n",
+		chargePointID, chargePointModel, chargePointVendor)
 
 	// Opret svar
-	confirmation := BootNotificationConfirmation{
-		CurrentTime: time.Now().Format(time.RFC3339),
-		Interval:    60,
-		Status:      "Accepted",
-	}
-
-	// Send svar
-	if err := conn.WriteJSON(confirmation); err != nil {
-		log.Printf("Error sending BootNotification response: %v", err)
+	return map[string]interface{}{
+		"currentTime": time.Now().Format(time.RFC3339),
+		"interval":    60,
+		"status":      "Accepted",
 	}
 }
 
-// handleHeartbeat håndterer Heartbeat
-func (cs *CentralSystemHandler) handleHeartbeat(chargePointID string, conn *websocket.Conn) {
+// handleHeartbeatRequest håndterer en Heartbeat-anmodning
+func (cs *CentralSystemHandler) handleHeartbeatRequest(chargePointID string) map[string]interface{} {
 	fmt.Printf("Heartbeat from %s\n", chargePointID)
 
 	// Opret svar
-	confirmation := HeartbeatConfirmation{
-		CurrentTime: time.Now().Format(time.RFC3339),
-	}
-
-	// Send svar
-	if err := conn.WriteJSON(confirmation); err != nil {
-		log.Printf("Error sending Heartbeat response: %v", err)
+	return map[string]interface{}{
+		"currentTime": time.Now().Format(time.RFC3339),
 	}
 }
 
-// handleAuthorize håndterer Authorization
-func (cs *CentralSystemHandler) handleAuthorize(chargePointID string, conn *websocket.Conn) {
-	fmt.Printf("Authorize request from %s\n", chargePointID)
+// handleStatusNotificationRequest håndterer en StatusNotification-anmodning
+func (cs *CentralSystemHandler) handleStatusNotificationRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	// Udpak vigtige statusoplysninger
+	status, _ := payload["status"].(string)
+	connectorId, _ := payload["connectorId"].(float64)
+	errorCode, _ := payload["errorCode"].(string)
 
-	// Opret svar
-	confirmation := AuthorizeConfirmation{
-		IdTagInfo: IdTagInfo{
-			Status: "Accepted",
+	fmt.Printf("StatusNotification from %s: ConnectorId=%v, Status=%s, ErrorCode=%s\n",
+		chargePointID, connectorId, status, errorCode)
+
+	// StatusNotification kræver et tomt svar iflg. OCPP-specifikationen
+	return map[string]interface{}{}
+}
+
+// handleStartTransactionRequest håndterer en StartTransaction-anmodning
+func (cs *CentralSystemHandler) handleStartTransactionRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	idTag, _ := payload["idTag"].(string)
+	connectorId, _ := payload["connectorId"].(float64)
+	meterStart, _ := payload["meterStart"].(float64)
+
+	fmt.Printf("StartTransaction from %s: ConnectorId=%v, IdTag=%s, MeterStart=%v\n",
+		chargePointID, connectorId, idTag, meterStart)
+
+	// Generer et tilfældigt transaktions-ID (i virkeligheden ville du bruge en database)
+	transactionId := int(time.Now().Unix() % 10000)
+
+	return map[string]interface{}{
+		"idTagInfo": map[string]interface{}{
+			"status": "Accepted",
+		},
+		"transactionId": transactionId,
+	}
+}
+
+// handleStopTransactionRequest håndterer en StopTransaction-anmodning
+func (cs *CentralSystemHandler) handleStopTransactionRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	transactionId, _ := payload["transactionId"].(float64)
+	meterStop, _ := payload["meterStop"].(float64)
+	reason, _ := payload["reason"].(string)
+
+	fmt.Printf("StopTransaction from %s: TransactionId=%v, MeterStop=%v, Reason=%s\n",
+		chargePointID, transactionId, meterStop, reason)
+
+	return map[string]interface{}{
+		"idTagInfo": map[string]interface{}{
+			"status": "Accepted",
 		},
 	}
+}
 
-	// Send svar
-	if err := conn.WriteJSON(confirmation); err != nil {
-		log.Printf("Error sending Authorize response: %v", err)
+// handleMeterValuesRequest håndterer en MeterValues-anmodning
+func (cs *CentralSystemHandler) handleMeterValuesRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	connectorId, _ := payload["connectorId"].(float64)
+	transactionId, _ := payload["transactionId"].(float64)
+
+	fmt.Printf("MeterValues from %s: ConnectorId=%v, TransactionId=%v\n",
+		chargePointID, connectorId, transactionId)
+
+	// Log meterværdier hvis tilgængelige
+	if meterValues, ok := payload["meterValue"].([]interface{}); ok && len(meterValues) > 0 {
+		fmt.Printf("  Received %d meter values\n", len(meterValues))
 	}
+
+	// MeterValues kræver et tomt svar iflg. OCPP-specifikationen
+	return map[string]interface{}{}
 }

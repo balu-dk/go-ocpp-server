@@ -1,6 +1,7 @@
 package ocppserver
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 )
@@ -20,7 +21,7 @@ func NewOCPPServer(config *Config, handler *CentralSystemHandler) *OCPPServer {
 	mux.HandleFunc("/", handler.HandleWebSocket)
 
 	server := &http.Server{
-		Addr:    config.ListenAddr,
+		Addr:    fmt.Sprintf(":%d", config.WebSocketPort), // Binder til alle interfaces
 		Handler: mux,
 	}
 
@@ -35,7 +36,9 @@ func NewOCPPServer(config *Config, handler *CentralSystemHandler) *OCPPServer {
 func (s *OCPPServer) Start() error {
 	// Start serveren i en goroutine
 	go func() {
-		log.Printf("OCPP Central System listening on ws://%s", s.config.ListenAddr)
+		wsURL := fmt.Sprintf("ws://%s:%d", s.config.Host, s.config.WebSocketPort)
+		log.Printf("OCPP Central System listening on %s", wsURL)
+
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed: %v", err)
 		}

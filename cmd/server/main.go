@@ -4,15 +4,16 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/balu-dk/go-ocpp-server/internal/server"
-	"github.com/balu-dk/go-ocpp-server/pkg/ocppserver"
+	"ocpp-server/internal/server"
+	"ocpp-server/pkg/ocppserver"
 )
 
 func main() {
-	// Opret konfiguration
-	config := ocppserver.NewConfig().
-		WithListenAddress(":8887").
-		WithSystemName("ocpp-central")
+	// Opret konfiguration baseret på miljøvariabler (eller standardværdier)
+	config := ocppserver.NewConfig()
+
+	// For at overskrive konfiguration programmatisk hvis nødvendigt:
+	// config.WithHost("example.com").WithWebSocketPort(9876)
 
 	// Opret central system handler
 	handler := ocppserver.NewCentralSystemHandler()
@@ -20,15 +21,22 @@ func main() {
 	// Opret OCPP server
 	ocppServer := ocppserver.NewOCPPServer(config, handler)
 
-	// Opret og start API server (valgfrit - kan udelades hvis du kun ønsker OCPP-server)
-	apiServer := server.NewAPIServer(ocppServer, ":8080")
+	// Opret og start API server
+	apiServer := server.NewAPIServer(ocppServer, config)
 	if err := apiServer.Start(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 
+	// Vis information om kørende server
+	wsURL := fmt.Sprintf("ws://%s:%d", config.Host, config.WebSocketPort)
+	apiURL := fmt.Sprintf("http://%s:%d/api/status", config.Host, config.APIPort)
+
 	fmt.Println("OCPP server started successfully")
-	fmt.Println("WebSocket endpoint: ws://localhost:8887")
-	fmt.Println("HTTP API endpoint: http://localhost:8080/api/status")
+	fmt.Println("Environment variables used (if set):")
+	fmt.Println("  OCPP_HOST, OCPP_WEBSOCKET_PORT, OCPP_API_PORT, OCPP_SYSTEM_NAME")
+	fmt.Println("")
+	fmt.Printf("WebSocket endpoint: %s\n", wsURL)
+	fmt.Printf("HTTP API endpoint: %s\n", apiURL)
 
 	// Hold serveren kørende
 	apiServer.RunForever()
