@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -18,7 +19,7 @@ const (
 	AuthorizeMsg        = "Authorize"
 )
 
-// BootNotificationRequest repræsenterer anmodningen fra en ladestation
+// BootNotificationRequest represents a request from a charge point
 type BootNotificationRequest struct {
 	ChargePointModel        string `json:"chargePointModel"`
 	ChargePointVendor       string `json:"chargePointVendor"`
@@ -26,48 +27,56 @@ type BootNotificationRequest struct {
 	FirmwareVersion         string `json:"firmwareVersion,omitempty"`
 }
 
-// BootNotificationConfirmation repræsenterer svaret til en ladestation
+// BootNotificationConfirmation represents a response to a charge point
 type BootNotificationConfirmation struct {
 	CurrentTime string `json:"currentTime"`
 	Interval    int    `json:"interval"`
 	Status      string `json:"status"`
 }
 
-// HeartbeatRequest repræsenterer en heartbeat anmodning
+// HeartbeatRequest represents a heartbeat request
 type HeartbeatRequest struct{}
 
-// HeartbeatConfirmation repræsenterer svaret på en heartbeat
+// HeartbeatConfirmation represents a response to a heartbeat
 type HeartbeatConfirmation struct {
 	CurrentTime string `json:"currentTime"`
 }
 
-// AuthorizeRequest repræsenterer en autorisationsanmodning
+// AuthorizeRequest represents an authorization request
 type AuthorizeRequest struct {
 	IdTag string `json:"idTag"`
 }
 
-// IdTagInfo indeholder oplysninger om en IdTag
+// IdTagInfo contains information about an IdTag
 type IdTagInfo struct {
 	Status string `json:"status"`
 }
 
-// AuthorizeConfirmation repræsenterer svaret på en autorisationsanmodning
+// AuthorizeConfirmation represents a response to an authorization request
 type AuthorizeConfirmation struct {
 	IdTagInfo IdTagInfo `json:"idTagInfo"`
 }
 
-// CentralSystemHandler håndterer OCPP-anmodninger fra ladestationer
-type CentralSystemHandler struct {
-	upgrader websocket.Upgrader
-	clients  map[string]*websocket.Conn
+// OCPPHandler defines the interface for OCPP message handlers
+type OCPPHandler interface {
+	http.Handler
+	GetCommandManager() *CommandManager
 }
 
-// NewCentralSystemHandler opretter en ny handler for centralserveren
+// CentralSystemHandler handles OCPP requests from charge points
+type CentralSystemHandler struct {
+	upgrader       websocket.Upgrader
+	clients        map[string]*websocket.Conn
+	commandManager *CommandManager
+	cmdMgrInit     sync.Once
+}
+
+// NewCentralSystemHandler creates a new handler for the central system
 func NewCentralSystemHandler() *CentralSystemHandler {
 	return &CentralSystemHandler{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Tillad forbindelser fra alle origins
+				return true // Allow connections from all origins
 			},
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -76,7 +85,21 @@ func NewCentralSystemHandler() *CentralSystemHandler {
 	}
 }
 
-// HandleWebSocket håndterer WebSocket-forbindelser fra ladestationer
+// ServeHTTP implements the http.Handler interface
+func (cs *CentralSystemHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cs.HandleWebSocket(w, r)
+}
+
+// GetCommandManager returns the command manager
+func (cs *CentralSystemHandler) GetCommandManager() *CommandManager {
+	// Initialize command manager once if it doesn't exist
+	cs.cmdMgrInit.Do(func() {
+		cs.commandManager = NewCommandManager(cs.clients)
+	})
+	return cs.commandManager
+}
+
+// HandleWebSocket handles WebSocket connections from charge points
 func (cs *CentralSystemHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := cs.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -84,35 +107,35 @@ func (cs *CentralSystemHandler) HandleWebSocket(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Få chargePointID direkte fra URL path
+	// Get chargePointID directly from URL path
 	// Format: localhost:9000/{id}
 	chargePointID := strings.TrimPrefix(r.URL.Path, "/")
 
-	// Håndter tilfælde hvor der kunne være flere skråstreger
+	// Handle case where there could be multiple slashes
 	if strings.Contains(chargePointID, "/") {
 		parts := strings.Split(chargePointID, "/")
-		chargePointID = parts[0] // Tag kun den første del
+		chargePointID = parts[0] // Take only the first part
 	}
 
 	if chargePointID == "" {
 		chargePointID = "unknown"
 	}
 
-	// Gem forbindelsen
+	// Store the connection
 	cs.clients[chargePointID] = conn
 	log.Printf("New connection from %s", chargePointID)
 
-	// Håndter indgående beskeder - sørg for at chargePointID ikke indeholder '/'
+	// Handle incoming messages - ensure chargePointID doesn't contain '/'
 	sanitizedID := chargePointID
 	go cs.handleMessages(sanitizedID, conn)
 }
 
-// handleAuthorizeRequest håndterer en Authorize-anmodning
+// handleAuthorizeRequest handles an Authorize request
 func (cs *CentralSystemHandler) handleAuthorizeRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
 	idTag, _ := payload["idTag"].(string)
 	fmt.Printf("Authorize request from %s: idTag=%s\n", chargePointID, idTag)
 
-	// Opret svar
+	// Create response
 	return map[string]interface{}{
 		"idTagInfo": map[string]interface{}{
 			"status": "Accepted",
@@ -120,7 +143,7 @@ func (cs *CentralSystemHandler) handleAuthorizeRequest(chargePointID string, pay
 	}
 }
 
-// handleMessages håndterer beskeder fra en ladestation
+// handleMessages handles messages from a charge point
 func (cs *CentralSystemHandler) handleMessages(chargePointID string, conn *websocket.Conn) {
 	defer func() {
 		conn.Close()
@@ -129,44 +152,74 @@ func (cs *CentralSystemHandler) handleMessages(chargePointID string, conn *webso
 	}()
 
 	for {
-		// Læs besked
+		// Read message
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("Error reading message: %v", err)
 			break
 		}
 
-		// Parse OCPP besked
+		// Parse OCPP message
 		log.Printf("Received message from %s: %s", chargePointID, message)
 
-		// Forsøg at parse JSON-arrayet [MessageTypeId, UniqueId, Action, Payload]
+		// Try to parse JSON array [MessageTypeId, UniqueId, Action, Payload]
 		var ocppMsg []interface{}
 		if err := json.Unmarshal(message, &ocppMsg); err != nil {
 			log.Printf("Error parsing OCPP message: %v", err)
 			continue
 		}
 
-		// Check at beskeden har det forventede format
+		// Check that the message has the expected format
 		if len(ocppMsg) < 3 {
 			log.Printf("Invalid OCPP message format: %s", message)
 			continue
 		}
 
-		// Beskedtypen (2 = Request, 3 = Response, 4 = Error)
+		// Message type (2 = Request, 3 = Response, 4 = Error)
 		msgTypeID, ok := ocppMsg[0].(float64)
 		if !ok {
 			log.Printf("Invalid message type ID: %v", ocppMsg[0])
 			continue
 		}
 
-		// Beskedens unikke ID
+		// Message unique ID
 		uniqueID, ok := ocppMsg[1].(string)
 		if !ok {
 			log.Printf("Invalid unique ID: %v", ocppMsg[1])
 			continue
 		}
 
-		// Hvis det er en anmodning (msgTypeID == 2)
+		// If it's a response (CallResult, msgTypeID == 3)
+		if msgTypeID == 3 {
+			// Process response to a command we sent
+			if len(ocppMsg) > 2 {
+				responsePayload, ok := ocppMsg[2].(map[string]interface{})
+				if !ok && ocppMsg[2] != nil {
+					log.Printf("Invalid response payload format: %v", ocppMsg[2])
+					continue
+				}
+
+				// Pass to command manager to handle
+				cs.GetCommandManager().HandleCommandResponse(uniqueID, responsePayload)
+			}
+			continue
+		}
+
+		// If it's an error response (CallError, msgTypeID == 4)
+		if msgTypeID == 4 {
+			// Parse error details
+			if len(ocppMsg) >= 5 {
+				errorCode, _ := ocppMsg[2].(string)
+				errorDescription, _ := ocppMsg[3].(string)
+				errorDetails, _ := ocppMsg[4].(map[string]interface{})
+
+				log.Printf("Received error response: code=%s, description=%s, details=%v",
+					errorCode, errorDescription, errorDetails)
+			}
+			continue
+		}
+
+		// If it's a request (msgTypeID == 2)
 		if msgTypeID == 2 {
 			action, ok := ocppMsg[2].(string)
 			if !ok {
@@ -174,7 +227,7 @@ func (cs *CentralSystemHandler) handleMessages(chargePointID string, conn *webso
 				continue
 			}
 
-			// Håndter de forskellige action typer
+			// Handle different action types
 			var payload map[string]interface{}
 			var response interface{}
 
@@ -203,10 +256,10 @@ func (cs *CentralSystemHandler) handleMessages(chargePointID string, conn *webso
 				response = cs.handleMeterValuesRequest(chargePointID, payload)
 			default:
 				log.Printf("Unsupported action: %s", action)
-				response = map[string]interface{}{} // Send tomt svar for ukendte handlinger
+				response = map[string]interface{}{} // Send empty response for unknown actions
 			}
 
-			// Send svar tilbage (CallResult)
+			// Send response back (CallResult)
 			callResult := []interface{}{3, uniqueID, response} // 3 = CallResult
 			if err := conn.WriteJSON(callResult); err != nil {
 				log.Printf("Error sending response: %v", err)
@@ -219,16 +272,16 @@ func (cs *CentralSystemHandler) handleMessages(chargePointID string, conn *webso
 	}
 }
 
-// handleBootNotificationRequest håndterer en BootNotification-anmodning
+// handleBootNotificationRequest handles a BootNotification request
 func (cs *CentralSystemHandler) handleBootNotificationRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
-	// Log indkommende data
+	// Log incoming data
 	chargePointModel, _ := payload["chargePointModel"].(string)
 	chargePointVendor, _ := payload["chargePointVendor"].(string)
 
 	fmt.Printf("BootNotification from %s: Model=%s, Vendor=%s\n",
 		chargePointID, chargePointModel, chargePointVendor)
 
-	// Opret svar
+	// Create response
 	return map[string]interface{}{
 		"currentTime": time.Now().Format(time.RFC3339),
 		"interval":    60,
@@ -236,19 +289,19 @@ func (cs *CentralSystemHandler) handleBootNotificationRequest(chargePointID stri
 	}
 }
 
-// handleHeartbeatRequest håndterer en Heartbeat-anmodning
+// handleHeartbeatRequest handles a Heartbeat request
 func (cs *CentralSystemHandler) handleHeartbeatRequest(chargePointID string) map[string]interface{} {
 	fmt.Printf("Heartbeat from %s\n", chargePointID)
 
-	// Opret svar
+	// Create response
 	return map[string]interface{}{
 		"currentTime": time.Now().Format(time.RFC3339),
 	}
 }
 
-// handleStatusNotificationRequest håndterer en StatusNotification-anmodning
+// handleStatusNotificationRequest handles a StatusNotification request
 func (cs *CentralSystemHandler) handleStatusNotificationRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
-	// Udpak vigtige statusoplysninger
+	// Extract important status information
 	status, _ := payload["status"].(string)
 	connectorId, _ := payload["connectorId"].(float64)
 	errorCode, _ := payload["errorCode"].(string)
@@ -256,11 +309,11 @@ func (cs *CentralSystemHandler) handleStatusNotificationRequest(chargePointID st
 	fmt.Printf("StatusNotification from %s: ConnectorId=%v, Status=%s, ErrorCode=%s\n",
 		chargePointID, connectorId, status, errorCode)
 
-	// StatusNotification kræver et tomt svar iflg. OCPP-specifikationen
+	// StatusNotification requires an empty response according to the OCPP specification
 	return map[string]interface{}{}
 }
 
-// handleStartTransactionRequest håndterer en StartTransaction-anmodning
+// handleStartTransactionRequest handles a StartTransaction request
 func (cs *CentralSystemHandler) handleStartTransactionRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
 	idTag, _ := payload["idTag"].(string)
 	connectorId, _ := payload["connectorId"].(float64)
@@ -269,7 +322,7 @@ func (cs *CentralSystemHandler) handleStartTransactionRequest(chargePointID stri
 	fmt.Printf("StartTransaction from %s: ConnectorId=%v, IdTag=%s, MeterStart=%v\n",
 		chargePointID, connectorId, idTag, meterStart)
 
-	// Generer et tilfældigt transaktions-ID (i virkeligheden ville du bruge en database)
+	// Generate a random transaction ID (in reality you would use a database)
 	transactionId := int(time.Now().Unix() % 10000)
 
 	return map[string]interface{}{
@@ -280,7 +333,7 @@ func (cs *CentralSystemHandler) handleStartTransactionRequest(chargePointID stri
 	}
 }
 
-// handleStopTransactionRequest håndterer en StopTransaction-anmodning
+// handleStopTransactionRequest handles a StopTransaction request
 func (cs *CentralSystemHandler) handleStopTransactionRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
 	transactionId, _ := payload["transactionId"].(float64)
 	meterStop, _ := payload["meterStop"].(float64)
@@ -296,7 +349,7 @@ func (cs *CentralSystemHandler) handleStopTransactionRequest(chargePointID strin
 	}
 }
 
-// handleMeterValuesRequest håndterer en MeterValues-anmodning
+// handleMeterValuesRequest handles a MeterValues request
 func (cs *CentralSystemHandler) handleMeterValuesRequest(chargePointID string, payload map[string]interface{}) map[string]interface{} {
 	connectorId, _ := payload["connectorId"].(float64)
 	transactionId, _ := payload["transactionId"].(float64)
@@ -304,11 +357,11 @@ func (cs *CentralSystemHandler) handleMeterValuesRequest(chargePointID string, p
 	fmt.Printf("MeterValues from %s: ConnectorId=%v, TransactionId=%v\n",
 		chargePointID, connectorId, transactionId)
 
-	// Log meterværdier hvis tilgængelige
+	// Log meter values if available
 	if meterValues, ok := payload["meterValue"].([]interface{}); ok && len(meterValues) > 0 {
 		fmt.Printf("  Received %d meter values\n", len(meterValues))
 	}
 
-	// MeterValues kræver et tomt svar iflg. OCPP-specifikationen
+	// MeterValues requires an empty response according to the OCPP specification
 	return map[string]interface{}{}
 }

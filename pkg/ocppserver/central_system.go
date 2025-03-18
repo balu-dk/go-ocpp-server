@@ -6,22 +6,22 @@ import (
 	"net/http"
 )
 
-// OCPPServer repræsenterer en OCPP centralserver
+// OCPPServer represents an OCPP central server
 type OCPPServer struct {
 	config  *Config
-	handler *CentralSystemHandler
+	handler OCPPHandler // Changed from http.Handler to OCPPHandler
 	server  *http.Server
 }
 
-// NewOCPPServer opretter en ny OCPP server med de angivne konfigurationer
-func NewOCPPServer(config *Config, handler *CentralSystemHandler) *OCPPServer {
+// NewOCPPServer creates a new OCPP server with the given configuration and handler
+func NewOCPPServer(config *Config, handler OCPPHandler) *OCPPServer {
 	mux := http.NewServeMux()
 
-	// Registrer WebSocket handler
-	mux.HandleFunc("/", handler.HandleWebSocket)
+	// Register WebSocket handler
+	mux.Handle("/", handler)
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", config.WebSocketPort), // Binder til alle interfaces
+		Addr:    fmt.Sprintf(":%d", config.WebSocketPort), // Binds to all interfaces
 		Handler: mux,
 	}
 
@@ -32,9 +32,9 @@ func NewOCPPServer(config *Config, handler *CentralSystemHandler) *OCPPServer {
 	}
 }
 
-// Start initierer og starter OCPP-serveren
+// Start initiates and starts the OCPP server
 func (s *OCPPServer) Start() error {
-	// Start serveren i en goroutine
+	// Start the server in a goroutine
 	go func() {
 		wsURL := fmt.Sprintf("ws://%s:%d", s.config.Host, s.config.WebSocketPort)
 		log.Printf("OCPP Central System listening on %s", wsURL)
@@ -47,7 +47,12 @@ func (s *OCPPServer) Start() error {
 	return nil
 }
 
-// RunForever holder serveren kørende indtil programmet afsluttes
+// GetHandler returns the handler used by the server
+func (s *OCPPServer) GetHandler() OCPPHandler {
+	return s.handler
+}
+
+// RunForever keeps the server running until the program exits
 func (s *OCPPServer) RunForever() {
-	select {} // Kører indtil programmet afsluttes
+	select {} // Runs until program exits
 }
