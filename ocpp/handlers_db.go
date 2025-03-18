@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"ocpp-server/pkg/database"
+	"ocpp-server/server/database"
 
 	"github.com/gorilla/websocket"
 )

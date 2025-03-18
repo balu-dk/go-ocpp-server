@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	"ocpp-server/pkg/ocppserver"
+	ocppserver "ocpp-server/ocpp"
 )
 
 // APIServer tilføjer REST API-funktionalitet til OCPP-serveren

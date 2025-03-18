@@ -8,9 +8,9 @@ import (
 	"syscall"
 	"time"
 
-	"ocpp-server/internal/server"
-	"ocpp-server/pkg/database"
-	"ocpp-server/pkg/ocppserver"
+	ocppserver "ocpp-server/ocpp"
+	"ocpp-server/server"
+	"ocpp-server/server/database"
 )
 
 func main() {

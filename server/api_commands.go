@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"ocpp-server/pkg/ocppserver"
+	ocppserver "ocpp-server/ocpp"
 )
 
 // registerCommandEndpoints adds API endpoints for sending commands to charge points

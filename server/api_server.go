@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"ocpp-server/pkg/database"
-	"ocpp-server/pkg/ocppserver"
+	ocppserver "ocpp-server/ocpp"
+	"ocpp-server/server/database"
 )
 
 // APIServerWithDB enhances the API server with database integration
