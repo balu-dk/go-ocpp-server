@@ -664,7 +664,17 @@ func (cs *CentralSystemHandlerWithDB) handleMeterValuesRequestWithDB(chargePoint
 	fmt.Printf("MeterValues from %s: ConnectorId=%v, TransactionId=%v\n",
 		chargePointID, connectorId, transactionId)
 
+	// Validate transaction
+	_, err := cs.dbService.GetTransaction(transactionId)
+	if err != nil {
+		log.Printf("Invalid transaction %d for meter values: %v", transactionId, err)
+		cs.logEvent(chargePointID, "WARNING", "System",
+			fmt.Sprintf("Received meter values for invalid transaction %d", transactionId))
+		return map[string]interface{}{}
+	}
+
 	// Process meter values if available
+	meterValuesCount := 0
 	if meterValues, ok := payload["meterValue"].([]interface{}); ok && len(meterValues) > 0 {
 		for _, meterValueInterface := range meterValues {
 			if meterValue, ok := meterValueInterface.(map[string]interface{}); ok {
@@ -690,7 +700,13 @@ func (cs *CentralSystemHandlerWithDB) handleMeterValuesRequestWithDB(chargePoint
 							// Extract value and metadata
 							valueStr, _ := sampledValue["value"].(string)
 							var value float64
-							fmt.Sscanf(valueStr, "%f", &value)
+
+							// Use more robust parsing
+							value, err = strconv.ParseFloat(valueStr, 64)
+							if err != nil {
+								log.Printf("Error parsing meter value: %v, skipping", err)
+								continue
+							}
 
 							unit, _ := sampledValue["unit"].(string)
 							if unit == "" {
@@ -717,6 +733,8 @@ func (cs *CentralSystemHandlerWithDB) handleMeterValuesRequestWithDB(chargePoint
 								log.Printf("Error saving meter value: %v", err)
 								cs.logEvent(chargePointID, "ERROR", "System",
 									fmt.Sprintf("Error saving meter value for transaction %d: %v", transactionId, err))
+							} else {
+								meterValuesCount++
 							}
 						}
 					}
@@ -724,8 +742,10 @@ func (cs *CentralSystemHandlerWithDB) handleMeterValuesRequestWithDB(chargePoint
 			}
 		}
 
+		// Log the number of meter values processed
 		cs.logEvent(chargePointID, "INFO", "ChargePoint",
-			fmt.Sprintf("Received meter values for transaction %d, connector %d", transactionId, connectorId))
+			fmt.Sprintf("Processed %d meter values for transaction %d, connector %d",
+				meterValuesCount, transactionId, connectorId))
 	}
 
 	// MeterValues requires an empty response according to the OCPP spec
