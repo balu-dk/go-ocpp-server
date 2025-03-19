@@ -75,10 +75,10 @@ The server can be configured using environment variables:
 | `OCPP_WEBSOCKET_PORT` | Port for WebSocket OCPP connections | `9000` |
 | `OCPP_API_PORT` | Port for the HTTP API | `9001` |
 | `OCPP_SYSTEM_NAME` | Name of the central system | `ocpp-central` |
+| `OCPP_HEARTBEAT_INTERVAL` | Interval in seconds between charge point heartbeats | `60` |
 | `OCPP_USE_TLS` | Enable TLS for secure connections | `false` |
 | `OCPP_CERT_FILE` | Path to TLS certificate file | `cert.pem` |
 | `OCPP_KEY_FILE` | Path to TLS key file | `key.pem` |
-| `OCPP_HEARTBEAT_INTERVAL` | Interval in seconds between charge point heartbeats | `60` |
 
 ### Database Configuration
 
@@ -386,6 +386,31 @@ The server is structured into several modules:
 5. **Monitoring**:
    - CloudWatch for logs and metrics
    - CloudWatch Alarms for automated monitoring
+
+### DigitalOcean Deployment Recommendations
+
+1. **Container Deployment**:
+   - DigitalOcean App Platform for fully managed deployment
+   - DigitalOcean Kubernetes (DOKS) for orchestration
+   - Droplets with Docker for direct VM deployment
+
+2. **Database Options**:
+   - DigitalOcean Managed PostgreSQL Database for production
+   - Database Clusters for high-availability requirements
+
+3. **Network Configuration**:
+   - DigitalOcean Load Balancers for distributing traffic
+   - Configure firewall rules to allow necessary ports
+   - Use Let's Encrypt for TLS certificates (available through DigitalOcean)
+
+4. **Security**:
+   - Use encrypted volumes for data storage
+   - Implement VPC networks for isolation
+   - Setup Cloud Firewalls to restrict access
+
+5. **Monitoring**:
+   - DigitalOcean Monitoring for metrics and alerts
+   - Integrate with DigitalOcean Monitoring API
 
 ## Contributing
 
