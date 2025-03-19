@@ -362,6 +362,118 @@ The server is structured into several modules:
   - Database service interface
   - SQLite and PostgreSQL implementations
 
+## No-Code OCPP Server Deployment Guide
+
+This guide explains how to deploy a ready-made OCPP server without writing any code. We'll use Docker Hub and Google Cloud Run for a completely code-free deployment.
+
+### What You'll Need
+
+- Google Cloud account (with billing enabled)
+- Web browser (for Google Cloud Console)
+- No coding experience required!
+
+### Step 1: Set Up Google Cloud Project
+
+1. Visit [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project by clicking on the project dropdown at the top and selecting "New Project"
+3. Name your project (e.g., "ocpp-server") and click "Create"
+4. Select your new project from the project dropdown
+
+### Step 2: Enable Required APIs
+
+1. In the Cloud Console search bar, type "API Library" and select it
+2. Search for and enable these APIs:
+   - Cloud Run API
+   - Cloud SQL Admin API
+   - Cloud Build API
+   - Secret Manager API
+
+### Step 3: Create a Database
+
+1. In the search bar, type "SQL" and select "SQL"
+2. Click "Create Instance" 
+3. Select "PostgreSQL"
+4. Provide an instance ID (e.g., "ocpp-db")
+5. Set a password (write it down, you'll need it)
+6. Under "Customize your instance", choose "Enterprise" and the smallest configuration
+7. Click "Create"
+8. Once the database is ready, click on it, then go to "Databases" and click "Create Database"
+9. Name the database "ocpp_server" and click "Create"
+10. Click on "Users" and note the default "postgres" username (or create a new user)
+
+### Step 4: Deploy the API Service in Cloud Run
+
+1. In the search bar, type "Cloud Run" and select it
+2. Click "Create Service"
+3. In the "Container image URL" field, click "Browse" and then "Configure"
+4. Select "Public registries" from the dropdown
+5. Type "yourusername/ocpp-server:latest" (replace with the actual Docker Hub image name)
+6. Click "Select"
+7. Under "Service name" enter "ocpp-api"
+8. Select "Allow unauthenticated invocations"
+9. Under "Container port", enter "9001"
+10. Click "Container, Variables & Secrets, Connections, Security"
+11. Go to the "Variables" tab and add these environment variables:
+    - OCPP_HOST: 0.0.0.0
+    - OCPP_API_PORT: 9001
+    - OCPP_WEBSOCKET_PORT: 9000
+    - DB_TYPE: postgres
+    - DB_HOST: 127.0.0.1
+    - DB_PORT: 5432
+    - DB_USER: postgres (or your custom user)
+    - DB_PASSWORD: [your database password]
+    - DB_NAME: ocpp_server
+12. Go to the "Connections" tab, check "Cloud SQL connections" and select your database instance
+13. Click "Create"
+
+### Step 5: Deploy the WebSocket Service in Cloud Run
+
+1. In Cloud Run, click "Create Service" again
+2. Use the same container image as in Step 4
+3. Under "Service name" enter "ocpp-websocket"
+4. Select "Allow unauthenticated invocations"
+5. Under "Container port", enter "9000"
+6. Click "Container, Variables & Secrets, Connections, Security"
+7. Add the same environment variables as in Step 4
+8. Go to the "Connections" tab, check "Cloud SQL connections" and select your database instance
+9. Under "Advanced Settings", find "Session affinity" and set it to "Enabled"
+10. Click "Create"
+
+### Step 6: Configure TLS (https/wss) with a Domain Name (Optional)
+
+If you want to use your own domain name:
+
+1. In the search bar, type "Load Balancing" and select it
+2. Follow the wizard to create an external HTTPS load balancer
+3. Point it to your Cloud Run services
+4. Configure your domain's DNS to point to the load balancer's IP address
+
+### Step 7: Start Using Your OCPP Server
+
+1. In Cloud Run, click on the "ocpp-api" service
+2. Note the URL (looks like "https://ocpp-api-xyz123.run.app")
+3. Your API endpoints are available at:
+   - `https://ocpp-api-xyz123.run.app/api/status`
+   - `https://ocpp-api-xyz123.run.app/api/charge-points`
+   - etc.
+
+4. In Cloud Run, click on the "ocpp-websocket" service
+5. Note the URL (looks like "https://ocpp-websocket-abc456.run.app")
+6. Your WebSocket endpoint is:
+   - `wss://ocpp-websocket-abc456.run.app/CP001` (replace CP001 with your charge point ID)
+
+### Troubleshooting
+
+- **Database connection issues:** Make sure your Cloud SQL instance is in the same region as your Cloud Run services
+- **Service not working:** Check the logs in Cloud Run by clicking on your service, then "Logs"
+- **WebSocket connection failures:** Ensure you're using "wss://" (not "ws://") and that session affinity is enabled
+
+### Costs
+
+- Cloud Run: Pay only for what you use (starts with a free tier)
+- Cloud SQL: Smallest instance costs ~$10/month
+- Data transfer: Usually minimal for OCPP traffic
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
