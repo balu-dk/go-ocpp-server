@@ -14,18 +14,18 @@ services:
       - OCPP_API_PORT=9001
       - OCPP_SYSTEM_NAME=ocpp-central
       - OCPP_HEARTBEAT_INTERVAL=60
-      # PostgreSQL Configuration is default
-      - DB_TYPE=postgres
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
-      - DB_NAME=ocpp_server
-      - DB_SSL_MODE=disable
+      # SQLite Configuration (default)
+      - DB_TYPE=sqlite
+      - DB_SQLITE_PATH=/app/data/ocpp_server.db
       
-      # Uncomment to use SQLite instead of PostgreSQL
-      # - DB_TYPE=sqlite
-      # - DB_SQLITE_PATH=/app/data/ocpp_server.db
+      # PostgreSQL Configuration (commented out)
+      # - DB_TYPE=postgres
+      # - DB_HOST=postgres
+      # - DB_PORT=5432
+      # - DB_USER=postgres
+      # - DB_PASSWORD=postgres
+      # - DB_NAME=ocpp_server
+      # - DB_SSL_MODE=disable
     volumes:
       - ocpp-data:/app/data
     restart: unless-stopped
@@ -35,36 +35,33 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
-    depends_on:
-      - postgres
+    # Uncomment for PostgreSQL dependency
+    # depends_on:
+    #   - postgres
 
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_USER=postgres
-      - POSTGRES_DB=ocpp_server
-      # Performance tuning for PostgreSQL
-      - POSTGRES_INITDB_ARGS=--data-checksums
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      # Add volume for initialization scripts
-      - ./postgres-init:/docker-entrypoint-initdb.d
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    # Basic PostgreSQL optimization
-    command: >
-      postgres
-        -c max_connections=100
-        -c shared_buffers=128MB
-        -c work_mem=16MB
-        -c maintenance_work_mem=64MB
+  # PostgreSQL service (commented out)
+  # postgres:
+  #   image: postgres:15-alpine
+  #   environment:
+  #     - POSTGRES_PASSWORD=postgres
+  #     - POSTGRES_USER=postgres
+  #     - POSTGRES_DB=ocpp_server
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U postgres"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   # Basic PostgreSQL optimization
+  #   command: >
+  #     postgres
+  #       -c max_connections=100
+  #       -c shared_buffers=128MB
+  #       -c work_mem=16MB
+  #       -c maintenance_work_mem=64MB
 
 volumes:
   ocpp-data:
-  postgres-data:
+  # postgres-data:
