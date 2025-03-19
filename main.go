@@ -83,7 +83,7 @@ func main() {
 	fmt.Printf("  POST %s/commands/trigger-message       - Trigger message from charge point\n", apiURL)
 	fmt.Printf("  POST %s/commands/generic               - Send any OCPP command\n", apiURL)
 	fmt.Printf("  POST %s/admin/close-transaction        - Administratively close a transaction\n", apiURL)
-	fmt.Printf("  GET  %s/reports/elrefusion             - Generate tax refund report\n", apiURL)
+	fmt.Printf("  GET  %s/reports/energy                 - Generate energy consumption report\n", apiURL)
 
 	// Setup graceful shutdown
 	setupGracefulShutdown(apiServer)

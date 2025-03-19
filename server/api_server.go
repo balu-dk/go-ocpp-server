@@ -115,8 +115,8 @@ func (s *APIServerWithDB) registerAPIEndpoints(mux *http.ServeMux) {
 	//  Endpoint for administrative closing
 	mux.HandleFunc("/api/admin/close-transaction", s.handleAdminCloseTransaction)
 
-	//  Endpoint for elrefusion
-	mux.HandleFunc("/api/reports/elrefusion", s.handleElrefusionReport)
+	//  Endpoint for energy reports
+	mux.HandleFunc("/api/reports/energy", s.handleEnergyReport)
 }
 
 // Start initiates the API server
@@ -553,7 +553,9 @@ func (s *APIServerWithDB) handleAdminCloseTransaction(w http.ResponseWriter, r *
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
-func (s *APIServerWithDB) handleElrefusionReport(w http.ResponseWriter, r *http.Request) {
+
+// Handle Energy Report
+func (s *APIServerWithDB) handleEnergyReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -590,8 +592,8 @@ func (s *APIServerWithDB) handleElrefusionReport(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Create a report suitable for elrefusion
-	type ElrefusionRecord struct {
+	// Create energy consumption record structure
+	type EnergyRecord struct {
 		ChargePointID   string    `json:"chargePointId"`
 		TransactionID   int       `json:"transactionId"`
 		StartTimestamp  time.Time `json:"startTimestamp"`
@@ -601,10 +603,10 @@ func (s *APIServerWithDB) handleElrefusionReport(w http.ResponseWriter, r *http.
 		Complete        bool      `json:"complete"`
 	}
 
-	records := make([]ElrefusionRecord, 0, len(transactions))
+	records := make([]EnergyRecord, 0, len(transactions))
 
 	for _, tx := range transactions {
-		records = append(records, ElrefusionRecord{
+		records = append(records, EnergyRecord{
 			ChargePointID:   tx.ChargePointID,
 			TransactionID:   tx.TransactionID,
 			StartTimestamp:  tx.StartTimestamp,
@@ -630,12 +632,12 @@ func (s *APIServerWithDB) handleElrefusionReport(w http.ResponseWriter, r *http.
 	}
 
 	response := struct {
-		StartDate              string             `json:"startDate"`
-		EndDate                string             `json:"endDate"`
-		TotalEnergyDelivered   float64            `json:"totalEnergyDelivered"`
-		CompleteTransactions   int                `json:"completeTransactions"`
-		IncompleteTransactions int                `json:"incompleteTransactions"`
-		Transactions           []ElrefusionRecord `json:"transactions"`
+		StartDate              string         `json:"startDate"`
+		EndDate                string         `json:"endDate"`
+		TotalEnergyDelivered   float64        `json:"totalEnergyDelivered"`
+		CompleteTransactions   int            `json:"completeTransactions"`
+		IncompleteTransactions int            `json:"incompleteTransactions"`
+		Transactions           []EnergyRecord `json:"transactions"`
 	}{
 		StartDate:              startDateStr,
 		EndDate:                endDateStr,
@@ -648,7 +650,7 @@ func (s *APIServerWithDB) handleElrefusionReport(w http.ResponseWriter, r *http.
 	// Set content type and filename for download
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition",
-		fmt.Sprintf("attachment; filename=elrefusion-%s-to-%s.json", startDateStr, endDateStr))
+		fmt.Sprintf("attachment; filename=energy-report-%s-to-%s.json", startDateStr, endDateStr))
 
 	json.NewEncoder(w).Encode(response)
 }
