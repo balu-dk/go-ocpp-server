@@ -36,8 +36,7 @@ services:
       retries: 3
       start_period: 5s
     depends_on:
-      postgres:
-        condition: service_healthy
+      - postgres
 
   postgres:
     image: postgres:15-alpine
@@ -47,18 +46,10 @@ services:
       - POSTGRES_DB=ocpp_server
       # Performance tuning for PostgreSQL
       - POSTGRES_INITDB_ARGS=--data-checksums
-      # Memory settings for better performance
-      - POSTGRES_SHARED_BUFFERS=128MB
-      - POSTGRES_EFFECTIVE_CACHE_SIZE=384MB
-      - POSTGRES_WORK_MEM=16MB
-      - POSTGRES_MAINTENANCE_WORK_MEM=64MB
     volumes:
       - postgres-data:/var/lib/postgresql/data
       # Add volume for initialization scripts
       - ./postgres-init:/docker-entrypoint-initdb.d
-    ports:
-      # Expose PostgreSQL port for external tools (optional)
-      - "5432:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -66,23 +57,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    # Optimize PostgreSQL for the container environment
+    # Basic PostgreSQL optimization
     command: >
       postgres
         -c max_connections=100
-        -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
-        -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-384MB}
-        -c work_mem=${POSTGRES_WORK_MEM:-16MB}
-        -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
-        -c random_page_cost=1.1
-        -c temp_file_limit=1GB
-        -c log_min_duration_statement=200ms
-        -c idle_in_transaction_session_timeout=10s
-        -c lock_timeout=1s
-        -c statement_timeout=60s
-        -c shared_preload_libraries=pg_stat_statements
-        -c pg_stat_statements.max=10000
-        -c pg_stat_statements.track=all
+        -c shared_buffers=128MB
+        -c work_mem=16MB
+        -c maintenance_work_mem=64MB
 
 volumes:
   ocpp-data:

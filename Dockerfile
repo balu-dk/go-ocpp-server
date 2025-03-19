@@ -71,11 +71,7 @@ EXPOSE 9000 9001
 # Set the volume mount point for persistent data
 VOLUME /app/data
 
-# Wait for PostgreSQL script
-COPY --chown=ocpp:ocpp wait-for-postgres.sh /app/
-RUN chmod +x /app/wait-for-postgres.sh
-
-# Set entrypoint with database wait capability
+# Set entrypoint
 ENTRYPOINT ["/app/ocpp-server"]
 
 # Add healthcheck to verify server is running properly
