@@ -7,7 +7,7 @@ A scalable and robust OCPP (Open Charge Point Protocol) server implementation in
 - **OCPP 1.6 Support**: Full implementation of the OCPP 1.6 protocol for communication with charging stations
 - **WebSocket Interface**: Real-time bidirectional communication with charge points
 - **RESTful API**: HTTP API for integration with other systems and administrative control
-- **Database Integration**: Persistent storage with both SQLite and PostgreSQL support
+- **PostgreSQL Database**: Persistent storage with PostgreSQL support
 - **Background Services**: Automated meter value collection, offline transaction monitoring, and data backup
 - **Flexible Configuration**: Environment variable-based configuration for easy deployment
 - **TLS Support**: Optional secure communication with charge points and API clients
@@ -18,7 +18,7 @@ A scalable and robust OCPP (Open Charge Point Protocol) server implementation in
 ### Prerequisites
 
 - Go 1.21 or higher
-- SQLite or PostgreSQL (optional for production deployments)
+- PostgreSQL database
 
 ### Installation
 
@@ -39,28 +39,21 @@ A scalable and robust OCPP (Open Charge Point Protocol) server implementation in
 # Build the Docker image
 docker build -t ocpp-server .
 
-# Run the container with SQLite
-docker run -p 9000:9000 -p 9001:9001 -e DB_TYPE=sqlite -v ocpp-data:/app/data ocpp-server
-
 # Run with PostgreSQL
-docker run -p 9000:9000 -p 9001:9001 \
-  -e DB_TYPE=postgres \
-  -e DB_HOST=your-postgres-host \
-  -e DB_PORT=5432 \
-  -e DB_USER=postgres \
-  -e DB_PASSWORD=yourpassword \
-  -e DB_NAME=ocpp_server \
-  ocpp-server
+docker-compose up -d
 ```
 
 ### Running locally
 
 ```bash
-# Run with SQLite (default)
+# Make sure PostgreSQL is running and accessible
+export DB_TYPE=postgres
+export DB_HOST=localhost
+export DB_PORT=5432
+export DB_USER=postgres
+export DB_PASSWORD=postgres
+export DB_NAME=ocpp_server
 ./ocpp-server
-
-# Run with custom configuration
-DB_TYPE=postgres DB_HOST=localhost DB_PORT=5432 DB_USER=postgres DB_PASSWORD=postgres ./ocpp-server
 ```
 
 ## Configuration
@@ -84,8 +77,7 @@ The server can be configured using environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DB_TYPE` | Database type (`sqlite` or `postgres`) | `sqlite` |
-| `DB_SQLITE_PATH` | Path to SQLite database file | `ocpp_server.db` |
+| `DB_TYPE` | Database type (always `postgres`) | `postgres` |
 | `DB_HOST` | PostgreSQL host | `localhost` |
 | `DB_PORT` | PostgreSQL port | `5432` |
 | `DB_USER` | PostgreSQL username | `postgres` |
@@ -360,7 +352,12 @@ The server is structured into several modules:
 - **database** - Data persistence layer
   - Database models
   - Database service interface
-  - SQLite and PostgreSQL implementations
+  - PostgreSQL implementation
+
+## Deployment
+
+See the deployment guides for specific cloud providers:
+- [DigitalOcean Deployment Guide](DIGITALOCEAN.md)
 
 ## Contributing
 
