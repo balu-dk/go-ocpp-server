@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  ocpp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "9000:9000"  # OCPP WebSocket port
+      - "9001:9001"  # API port
+    environment:
+      - OCPP_HOST=0.0.0.0
+      - OCPP_WEBSOCKET_PORT=9000
+      - OCPP_API_PORT=9001
+      - OCPP_SYSTEM_NAME=ocpp-central
+      - OCPP_HEARTBEAT_INTERVAL=60
+      # PostgreSQL Configuration is default
+      - DB_TYPE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=ocpp_server
+      - DB_SSL_MODE=disable
+      
+      # Uncomment to use SQLite instead of PostgreSQL
+      # - DB_TYPE=sqlite
+      # - DB_SQLITE_PATH=/app/data/ocpp_server.db
+    volumes:
+      - ocpp-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:9001/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=ocpp_server
+      # Performance tuning for PostgreSQL
+      - POSTGRES_INITDB_ARGS=--data-checksums
+      # Memory settings for better performance
+      - POSTGRES_SHARED_BUFFERS=128MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=384MB
+      - POSTGRES_WORK_MEM=16MB
+      - POSTGRES_MAINTENANCE_WORK_MEM=64MB
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Add volume for initialization scripts
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    ports:
+      # Expose PostgreSQL port for external tools (optional)
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Optimize PostgreSQL for the container environment
+    command: >
+      postgres
+        -c max_connections=100
+        -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+        -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-384MB}
+        -c work_mem=${POSTGRES_WORK_MEM:-16MB}
+        -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+        -c random_page_cost=1.1
+        -c temp_file_limit=1GB
+        -c log_min_duration_statement=200ms
+        -c idle_in_transaction_session_timeout=10s
+        -c lock_timeout=1s
+        -c statement_timeout=60s
+        -c shared_preload_libraries=pg_stat_statements
+        -c pg_stat_statements.max=10000
+        -c pg_stat_statements.track=all
+
+volumes:
+  ocpp-data:
+  postgres-data:
