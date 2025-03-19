@@ -111,6 +111,12 @@ func (s *APIServerWithDB) registerAPIEndpoints(mux *http.ServeMux) {
 
 	// Endpoint for generic commands (allows any OCPP command to be sent)
 	mux.HandleFunc("/api/commands/generic", s.handleGenericCommand)
+
+	//  Endpoint for administrative closing
+	mux.HandleFunc("/api/admin/close-transaction", s.handleAdminCloseTransaction)
+
+	//  Endpoint for elrefusion
+	mux.HandleFunc("/api/reports/elrefusion", s.handleElrefusionReport)
 }
 
 // Start initiates the API server
@@ -428,4 +434,221 @@ func (s *APIServerWithDB) handleAuthorizations(w http.ResponseWriter, r *http.Re
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *APIServerWithDB) handleAdminCloseTransaction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var request struct {
+		TransactionID int     `json:"transactionId"`
+		FinalEnergy   float64 `json:"finalEnergy"` // in kWh
+		Reason        string  `json:"reason"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if request.TransactionID <= 0 {
+		http.Error(w, "transactionId is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get the transaction
+	tx, err := s.dbService.GetTransaction(request.TransactionID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Transaction not found: %v", err), http.StatusNotFound)
+		return
+	}
+
+	if tx.IsComplete {
+		http.Error(w, "Transaction is already complete", http.StatusBadRequest)
+		return
+	}
+
+	// Update transaction
+	tx.StopTimestamp = time.Now()
+	tx.IsComplete = true
+
+	// If final energy is provided, use it
+	if request.FinalEnergy > 0 {
+		// Convert kWh to Wh for MeterStop
+		tx.MeterStop = tx.MeterStart + int(request.FinalEnergy*1000)
+		tx.EnergyDelivered = request.FinalEnergy
+	} else {
+		// Use the latest meter values if available
+		meterValues, _ := s.dbService.GetLatestMeterValueForTransaction(tx.TransactionID)
+		if len(meterValues) > 0 {
+			// Find the latest energy value
+			var latestEnergyValue float64
+			for _, mv := range meterValues {
+				if mv.Measurand == "Energy.Active.Import.Register" {
+					latestEnergyValue = mv.Value
+					// Convert to Wh if necessary
+					if mv.Unit == "kWh" {
+						latestEnergyValue *= 1000
+					}
+				}
+			}
+
+			if latestEnergyValue > 0 {
+				tx.MeterStop = int(latestEnergyValue)
+				tx.EnergyDelivered = float64(tx.MeterStop-tx.MeterStart) / 1000.0
+			}
+		}
+	}
+
+	if request.Reason != "" {
+		tx.StopReason = request.Reason
+	} else {
+		tx.StopReason = "AdminClosed"
+	}
+
+	if err := s.dbService.UpdateTransaction(tx); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to update transaction: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Also update connector status if needed
+	connector, err := s.dbService.GetConnector(tx.ChargePointID, tx.ConnectorID)
+	if err == nil {
+		connector.Status = "Available"
+		connector.UpdatedAt = time.Now()
+		s.dbService.SaveConnector(connector)
+	}
+
+	// Log this administrative action
+	log.Printf("Transaction %d administratively closed. Final energy: %.2f kWh, Reason: %s",
+		tx.TransactionID, tx.EnergyDelivered, tx.StopReason)
+
+	// Create a log entry
+	logEntry := &database.Log{
+		ChargePointID: tx.ChargePointID,
+		Timestamp:     time.Now(),
+		Level:         "WARNING",
+		Source:        "Admin",
+		Message: fmt.Sprintf("Transaction %d administratively closed. Final energy: %.2f kWh, Reason: %s",
+			tx.TransactionID, tx.EnergyDelivered, tx.StopReason),
+	}
+	s.dbService.AddLog(logEntry)
+
+	// Return response
+	response := struct {
+		Success         bool    `json:"success"`
+		Message         string  `json:"message"`
+		TransactionID   int     `json:"transactionId"`
+		EnergyDelivered float64 `json:"energyDelivered"`
+	}{
+		Success:         true,
+		Message:         "Transaction closed successfully",
+		TransactionID:   tx.TransactionID,
+		EnergyDelivered: tx.EnergyDelivered,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+func (s *APIServerWithDB) handleElrefusionReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse query parameters
+	startDateStr := r.URL.Query().Get("startDate")
+	endDateStr := r.URL.Query().Get("endDate")
+
+	if startDateStr == "" || endDateStr == "" {
+		http.Error(w, "startDate and endDate parameters are required", http.StatusBadRequest)
+		return
+	}
+
+	startDate, err := time.Parse("2006-01-02", startDateStr)
+	if err != nil {
+		http.Error(w, "Invalid startDate format. Use YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	endDate, err := time.Parse("2006-01-02", endDateStr)
+	if err != nil {
+		http.Error(w, "Invalid endDate format. Use YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	// Add one day to endDate to include the full day
+	endDate = endDate.Add(24 * time.Hour)
+
+	// Get transactions for the period
+	transactions, err := s.dbService.GetTransactionsForPeriod(startDate, endDate)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error retrieving transactions: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Create a report suitable for elrefusion
+	type ElrefusionRecord struct {
+		ChargePointID   string    `json:"chargePointId"`
+		TransactionID   int       `json:"transactionId"`
+		StartTimestamp  time.Time `json:"startTimestamp"`
+		StopTimestamp   time.Time `json:"stopTimestamp"`
+		EnergyDelivered float64   `json:"energyDelivered"`
+		IdTag           string    `json:"idTag"`
+		Complete        bool      `json:"complete"`
+	}
+
+	records := make([]ElrefusionRecord, 0, len(transactions))
+
+	for _, tx := range transactions {
+		records = append(records, ElrefusionRecord{
+			ChargePointID:   tx.ChargePointID,
+			TransactionID:   tx.TransactionID,
+			StartTimestamp:  tx.StartTimestamp,
+			StopTimestamp:   tx.StopTimestamp,
+			EnergyDelivered: tx.EnergyDelivered,
+			IdTag:           tx.IdTag,
+			Complete:        tx.IsComplete,
+		})
+	}
+
+	// Calculate totals
+	var totalEnergy float64
+	var completeTransactions int
+	var incompleteTransactions int
+
+	for _, record := range records {
+		totalEnergy += record.EnergyDelivered
+		if record.Complete {
+			completeTransactions++
+		} else {
+			incompleteTransactions++
+		}
+	}
+
+	response := struct {
+		StartDate              string             `json:"startDate"`
+		EndDate                string             `json:"endDate"`
+		TotalEnergyDelivered   float64            `json:"totalEnergyDelivered"`
+		CompleteTransactions   int                `json:"completeTransactions"`
+		IncompleteTransactions int                `json:"incompleteTransactions"`
+		Transactions           []ElrefusionRecord `json:"transactions"`
+	}{
+		StartDate:              startDateStr,
+		EndDate:                endDateStr,
+		TotalEnergyDelivered:   totalEnergy,
+		CompleteTransactions:   completeTransactions,
+		IncompleteTransactions: incompleteTransactions,
+		Transactions:           records,
+	}
+
+	// Set content type and filename for download
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition",
+		fmt.Sprintf("attachment; filename=elrefusion-%s-to-%s.json", startDateStr, endDateStr))
+
+	json.NewEncoder(w).Encode(response)
 }

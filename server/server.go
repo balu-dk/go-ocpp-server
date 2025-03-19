@@ -8,14 +8,14 @@ import (
 	ocppserver "ocpp-server/ocpp"
 )
 
-// APIServer tilføjer REST API-funktionalitet til OCPP-serveren
+// APIServer integrates REST API functionality for the OCPP server
 type APIServer struct {
 	ocppServer *ocppserver.OCPPServer
 	httpServer *http.Server
 	config     *ocppserver.Config
 }
 
-// NewAPIServer opretter en ny API-server der wrapperer OCPP-serveren
+// NewAPIServer starts a new API server that wraps the OCPP server
 func NewAPIServer(ocppServer *ocppserver.OCPPServer, config *ocppserver.Config) *APIServer {
 	mux := http.NewServeMux()
 
@@ -39,14 +39,14 @@ func NewAPIServer(ocppServer *ocppserver.OCPPServer, config *ocppserver.Config) 
 	}
 }
 
-// Start starter både OCPP-serveren og HTTP API
+// Start() starts both the OCPP server and the HTTP API Server
 func (s *APIServer) Start() error {
-	// Start OCPP-serveren
+	// Start the OCPP
 	if err := s.ocppServer.Start(); err != nil {
 		return err
 	}
 
-	// Start HTTP API-serveren
+	// Start the HTTP API server
 	go func() {
 		apiURL := fmt.Sprintf("http://%s:%d", s.config.Host, s.config.APIPort)
 		log.Printf("HTTP API server listening on %s\n", apiURL)
@@ -59,7 +59,7 @@ func (s *APIServer) Start() error {
 	return nil
 }
 
-// RunForever holder serveren kørende indtil programmet afsluttes
+// RunForever keeps APIServer running until terminated
 func (s *APIServer) RunForever() {
 	s.ocppServer.RunForever()
 }

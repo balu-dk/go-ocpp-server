@@ -3,43 +3,15 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	ocppserver "ocpp-server/ocpp"
+	"ocpp-server/server/database"
 )
 
-// registerCommandEndpoints adds API endpoints for sending commands to charge points
-func (s *APIServerWithDB) registerCommandEndpoints(mux *http.ServeMux) {
-	// Endpoint for remote start transaction
-	mux.HandleFunc("/api/commands/remoteStart", s.handleRemoteStart)
-
-	// Endpoint for remote stop transaction
-	mux.HandleFunc("/api/commands/remoteStop", s.handleRemoteStop)
-
-	// Endpoint for reset
-	mux.HandleFunc("/api/commands/reset", s.handleReset)
-
-	// Endpoint for unlock connector
-	mux.HandleFunc("/api/commands/unlockConnector", s.handleUnlockConnector)
-
-	// Endpoint for get configuration
-	mux.HandleFunc("/api/commands/getConfiguration", s.handleGetConfiguration)
-
-	// Endpoint for change configuration
-	mux.HandleFunc("/api/commands/changeConfiguration", s.handleChangeConfiguration)
-
-	// Endpoint for clear cache
-	mux.HandleFunc("/api/commands/clearCache", s.handleClearCache)
-
-	// Endpoint for trigger message
-	mux.HandleFunc("/api/commands/triggerMessage", s.handleTriggerMessage)
-
-	// Endpoint for generic commands (allows any OCPP command to be sent)
-	mux.HandleFunc("/api/commands/generic", s.handleGenericCommand)
-}
-
-// getCommandManager returns the command manager from the OCPP server
 // getCommandManager returns the command manager from the OCPP server
 func (s *APIServerWithDB) getCommandManager() *ocppserver.CommandManager {
 	// Now we can directly access the CommandManager through our OCPPHandler interface
@@ -97,13 +69,14 @@ func (s *APIServerWithDB) handleRemoteStop(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Parse request body - we support two formats:
-	// 1. The standard format with transactionId
-	// 2. A simplified format with just chargePointId and connectorId
+	// Parse request body supports 2 formats:
+	// 1. OCPP standard format with transactionId
+	// 2. An easy-to-use format with only chargePointId and connectorId that retrieves latest transaction
 	var request struct {
 		ChargePointID string `json:"chargePointId"`
 		TransactionID *int   `json:"transactionId,omitempty"`
 		ConnectorID   *int   `json:"connectorId,omitempty"`
+		Reason        string `json:"reason,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -118,11 +91,11 @@ func (s *APIServerWithDB) handleRemoteStop(w http.ResponseWriter, r *http.Reques
 
 	var transactionID int
 
-	// If transaction ID is provided, use it directly
+	// Use transaction ID if available
 	if request.TransactionID != nil && *request.TransactionID > 0 {
 		transactionID = *request.TransactionID
 	} else if request.ConnectorID != nil && *request.ConnectorID > 0 {
-		// If only connector ID is provided, try to find the active transaction
+		// If only  connector ID is available, try to find the transaction
 		tx, err := s.dbService.GetActiveTransactionForConnector(request.ChargePointID, *request.ConnectorID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("No active transaction found: %v", err), http.StatusNotFound)
@@ -134,11 +107,36 @@ func (s *APIServerWithDB) handleRemoteStop(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Send command
+	// Send RemoteStopTransaction command
 	success, err := s.getCommandManager().RemoteStopTransaction(request.ChargePointID, transactionID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to send command: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	// If command was successful, update transaction with StopReason
+	if success {
+		// Set default StopReason if no other is given
+		stopReason := "Remote"
+		if request.Reason != "" {
+			stopReason = fmt.Sprintf("Remote: %s", request.Reason)
+		}
+
+		// Mark stopReason as StopReason but don't stop transaction until we receieve StopTransaction from Charge Point
+		err := s.dbService.MarkTransactionStopReason(transactionID, stopReason)
+		if err != nil {
+			log.Printf("Warning: Failed to mark stop reason for transaction %d: %v", transactionID, err)
+		}
+
+		// Log actions
+		s.dbService.AddLog(&database.Log{
+			ChargePointID: request.ChargePointID,
+			Timestamp:     time.Now(),
+			Level:         "INFO",
+			Source:        "API",
+			Message: fmt.Sprintf("Remote stop initiated for transaction %d with reason: %s",
+				transactionID, stopReason),
+		})
 	}
 
 	// Return response

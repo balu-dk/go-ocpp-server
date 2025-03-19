@@ -274,6 +274,42 @@ func (cs *CentralSystemHandlerWithDB) updateChargePointConnection(chargePointID 
 	}
 }
 
+func (cs *CentralSystemHandlerWithDB) handlePendingTransactionsOnReconnect(chargePointID string) {
+	// Get all incomplete transactions for this charge point
+	incompleteTransactions, err := cs.dbService.GetIncompleteTransactions(chargePointID)
+	if err != nil {
+		cs.logEvent(chargePointID, "ERROR", "System",
+			fmt.Sprintf("Error checking for incomplete transactions: %v", err))
+		return
+	}
+
+	if len(incompleteTransactions) == 0 {
+		return
+	}
+
+	cs.logEvent(chargePointID, "INFO", "System",
+		fmt.Sprintf("Found %d incomplete transactions after reconnect", len(incompleteTransactions)))
+
+	// Request status update for all connectors
+	for _, tx := range incompleteTransactions {
+		connectorID := tx.ConnectorID
+
+		// Trigger a StatusNotification to get current connector status
+		_, err := cs.GetCommandManager().TriggerMessage(chargePointID, "StatusNotification", &connectorID)
+		if err != nil {
+			cs.logEvent(chargePointID, "ERROR", "System",
+				fmt.Sprintf("Failed to trigger StatusNotification for connector %d: %v", connectorID, err))
+		}
+
+		// Request latest meter values for this connector
+		_, err = cs.GetCommandManager().TriggerMessage(chargePointID, "MeterValues", &connectorID)
+		if err != nil {
+			cs.logEvent(chargePointID, "ERROR", "System",
+				fmt.Sprintf("Failed to trigger MeterValues for connector %d: %v", connectorID, err))
+		}
+	}
+}
+
 // handleBootNotificationRequestWithDB handles a BootNotification request with database integration
 func (cs *CentralSystemHandlerWithDB) handleBootNotificationRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
 	// Extract data from payload
@@ -339,6 +375,9 @@ func (cs *CentralSystemHandlerWithDB) handleBootNotificationRequestWithDB(charge
 
 	// Log the heartbeat interval that's being sent
 	log.Printf("Using heartbeat interval of %d seconds for charge point %s", cp.HeartbeatInterval, chargePointID)
+
+	// Check for incomplete transactions when a charge point reconnects
+	go cs.handlePendingTransactionsOnReconnect(chargePointID)
 
 	// Create response with the correct interval
 	return map[string]interface{}{
@@ -435,29 +474,29 @@ func (cs *CentralSystemHandlerWithDB) handleAuthorizeRequestWithDB(chargePointID
 
 // handleStatusNotificationRequestWithDB handles a StatusNotification request with database integration
 func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
-	// Extract status information
+	// Pull status information
 	status, _ := payload["status"].(string)
 	connectorIdFloat, _ := payload["connectorId"].(float64)
 	connectorId := int(connectorIdFloat)
 	errorCode, _ := payload["errorCode"].(string)
 
-	fmt.Printf("StatusNotification from %s: ConnectorId=%v, Status=%s, ErrorCode=%s\n",
+	fmt.Printf("StatusNotification fra %s: ConnectorId=%v, Status=%s, ErrorCode=%s\n",
 		chargePointID, connectorId, status, errorCode)
 
 	// Update connector status in database
 	if connectorId == 0 {
-		// Connector 0 is the charge point itself
+		// Conntor 0 should be the Charge Point itself according to OCPP
 		cp, err := cs.dbService.GetChargePoint(chargePointID)
 		if err == nil {
 			cp.Status = status
 			cp.UpdatedAt = time.Now()
 			if err := cs.dbService.SaveChargePoint(cp); err != nil {
-				log.Printf("Error updating charge point status: %v", err)
-				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error updating charge point status: %v", err))
+				log.Printf("Fejl ved opdatering af ladestander status: %v", err)
+				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Fejl ved opdatering af ladestander status: %v", err))
 			}
 		} else {
-			log.Printf("Charge point not found for status update: %s", chargePointID)
-			cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Charge point not found for status update: %s", chargePointID))
+			log.Printf("Ladestander ikke fundet for status opdatering: %s", chargePointID)
+			cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Ladestander ikke fundet for status opdatering: %s", chargePointID))
 		}
 	} else {
 		// Update or create connector
@@ -479,16 +518,92 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 		}
 
 		if err := cs.dbService.SaveConnector(connector); err != nil {
-			log.Printf("Error saving connector status: %v", err)
-			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error saving connector status: %v", err))
+			log.Printf("Fejl ved gemning af connector status: %v", err)
+			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Fejl ved gemning af connector status: %v", err))
 		}
 	}
 
-	// Log the status change
+	// Log status change
 	cs.logEvent(chargePointID, "INFO", "ChargePoint",
-		fmt.Sprintf("Status change for connector %d: %s, ErrorCode: %s", connectorId, status, errorCode))
+		fmt.Sprintf("Status ændring for connector %d: %s, ErrorCode: %s", connectorId, status, errorCode))
 
-	// StatusNotification requires an empty response according to the OCPP spec
+	// Extra handling for statuses that indicates a complete transaction
+	if connectorId > 0 && (status == "Available" || status == "Faulted") {
+		// Check if there's an incomplete transaction for this connector
+		tx, err := cs.dbService.GetActiveTransactionForConnector(chargePointID, connectorId)
+		if err == nil && tx != nil {
+			// Connector is Available but there's an incomplete transaction
+			cs.logEvent(chargePointID, "WARNING", "System",
+				fmt.Sprintf("Connector %d er %s men har ufuldstændig transaktion %d. Vil anmode om målerværdier og lukke.",
+					connectorId, status, tx.TransactionID))
+
+			// Request final meter values for this transaction
+			_, err = cs.GetCommandManager().TriggerMessage(chargePointID, "MeterValues", &connectorId)
+			if err != nil {
+				cs.logEvent(chargePointID, "ERROR", "System",
+					fmt.Sprintf("Fejl ved anmodning om målerværdier for connector %d: %v", connectorId, err))
+			}
+
+			// Close transaction after meter values
+			go func(txID int) {
+				// Wait on meter values
+				time.Sleep(5 * time.Second)
+
+				// Get latest transaction details
+				updatedTx, err := cs.dbService.GetTransaction(txID)
+				if err != nil {
+					cs.logEvent(chargePointID, "ERROR", "System",
+						fmt.Sprintf("Kunne ikke hente transaktion %d: %v", txID, err))
+					return
+				}
+
+				// Get latest meter values
+				meterValues, err := cs.dbService.GetLatestMeterValueForTransaction(txID)
+				if err != nil {
+					cs.logEvent(chargePointID, "WARNING", "System",
+						fmt.Sprintf("Ingen målerværdier fundet for transaktion %d. Bruger senest kendte værdi.", txID))
+				}
+
+				// Close transaction
+				updatedTx.StopTimestamp = time.Now()
+				updatedTx.IsComplete = true
+
+				// Use latest meter values for MeterStop, if meter values are available
+				if meterValues != nil && len(meterValues) > 0 {
+					// Find latest Energy.Active.Import.Register value
+					var latestEnergyValue float64
+					for _, mv := range meterValues {
+						if mv.Measurand == "Energy.Active.Import.Register" {
+							latestEnergyValue = mv.Value
+						}
+					}
+
+					// Convert til Wh if necessary
+					if latestEnergyValue > 0 {
+						// Convert kWh to Wh if unit is kWh
+						if meterValues[0].Unit == "kWh" {
+							latestEnergyValue *= 1000
+						}
+						updatedTx.MeterStop = int(latestEnergyValue)
+						updatedTx.EnergyDelivered = float64(updatedTx.MeterStop-updatedTx.MeterStart) / 1000.0
+					}
+				}
+
+				updatedTx.StopReason = "PowerLoss"
+
+				if err := cs.dbService.UpdateTransaction(updatedTx); err != nil {
+					cs.logEvent(chargePointID, "ERROR", "System",
+						fmt.Sprintf("Fejl ved lukning af transaktion %d: %v", txID, err))
+				} else {
+					cs.logEvent(chargePointID, "INFO", "System",
+						fmt.Sprintf("Successfully lukkede transaktion %d efter offline periode. Energi leveret: %.2f kWh",
+							txID, updatedTx.EnergyDelivered))
+				}
+			}(tx.TransactionID)
+		}
+	}
+
+	// StatusNotification kræver et tomt svar ifølge OCPP specifikationen
 	return map[string]interface{}{}
 }
 
@@ -571,12 +686,12 @@ func (cs *CentralSystemHandlerWithDB) handleStartTransactionRequestWithDB(charge
 
 // handleStopTransactionRequestWithDB handles a StopTransaction request with database integration
 func (cs *CentralSystemHandlerWithDB) handleStopTransactionRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
-	// Extract data from payload
+	// Pull data from payload
 	transactionIdFloat, _ := payload["transactionId"].(float64)
 	transactionId := int(transactionIdFloat)
 	meterStopFloat, _ := payload["meterStop"].(float64)
 	meterStop := int(meterStopFloat)
-	reason, _ := payload["reason"].(string)
+	reasonFromPayload, _ := payload["reason"].(string)
 	timestampStr, _ := payload["timestamp"].(string)
 	idTag, _ := payload["idTag"].(string)
 
@@ -594,7 +709,7 @@ func (cs *CentralSystemHandlerWithDB) handleStopTransactionRequestWithDB(chargeP
 	}
 
 	fmt.Printf("StopTransaction from %s: TransactionId=%v, MeterStop=%v, Reason=%s\n",
-		chargePointID, transactionId, meterStop, reason)
+		chargePointID, transactionId, meterStop, reasonFromPayload)
 
 	// Update transaction in database
 	transaction, err := cs.dbService.GetTransaction(transactionId)
@@ -605,10 +720,18 @@ func (cs *CentralSystemHandlerWithDB) handleStopTransactionRequestWithDB(chargeP
 	} else {
 		transaction.StopTimestamp = timestamp
 		transaction.MeterStop = meterStop
-		transaction.StopReason = reason
+
+		// Preserve existing StopReason if already set via Remote Stop
+		if transaction.StopReason == "" || transaction.StopReason == "PowerLoss" {
+			transaction.StopReason = reasonFromPayload
+		} else if reasonFromPayload != "" && !strings.HasPrefix(transaction.StopReason, "Remote") {
+			// If existing StopReason is present combine with new
+			transaction.StopReason = fmt.Sprintf("%s, %s", transaction.StopReason, reasonFromPayload)
+		}
+
 		transaction.IsComplete = true
 
-		// Calculate energy delivered in kWh
+		// Calculate energy in kWh
 		energyWh := float64(meterStop - transaction.MeterStart)
 		transaction.EnergyDelivered = energyWh / 1000.0 // Convert Wh to kWh
 
@@ -618,7 +741,7 @@ func (cs *CentralSystemHandlerWithDB) handleStopTransactionRequestWithDB(chargeP
 				fmt.Sprintf("Error updating transaction %d: %v", transactionId, err))
 		}
 
-		// Update connector status back to available
+		// Update connector status to Available
 		connector, err := cs.dbService.GetConnector(chargePointID, transaction.ConnectorID)
 		if err == nil {
 			connector.Status = "Available"
@@ -628,13 +751,13 @@ func (cs *CentralSystemHandlerWithDB) handleStopTransactionRequestWithDB(chargeP
 			}
 		}
 
-		// Log the transaction stop
+		// Log transaction
 		cs.logEvent(chargePointID, "INFO", "System",
 			fmt.Sprintf("Transaction %d stopped. Energy delivered: %.2f kWh, Reason: %s",
-				transactionId, transaction.EnergyDelivered, reason))
+				transactionId, transaction.EnergyDelivered, transaction.StopReason))
 	}
 
-	// Check authorization status for the provided idTag (if any)
+	// Check autorization status for the idTag (if any)
 	authStatus := "Accepted"
 	if idTag != "" {
 		auth, err := cs.dbService.GetAuthorization(idTag)

@@ -53,9 +53,10 @@ type MeterValue struct {
 	ChargePointID string    `json:"chargePointId"`
 	ConnectorID   int       `json:"connectorId"`
 	Timestamp     time.Time `json:"timestamp"`
-	Value         float64   `json:"value"`     // The actual reading value
-	Unit          string    `json:"unit"`      // Wh, kWh, W, A, V, etc.
-	Measurand     string    `json:"measurand"` // Energy.Active.Import.Register, Power.Active.Import, etc.
+	Value         float64   `json:"value"`            // The actual reading value
+	Unit          string    `json:"unit"`             // Wh, kWh, W, A, V, etc.
+	Measurand     string    `json:"measurand"`        // Energy.Active.Import.Register, Power.Active.Import, etc.
+	Source        string    `json:"source,omitempty"` // Source of the meter value: ChargePoint, Backup, etc.
 }
 
 // Log represents a system log entry

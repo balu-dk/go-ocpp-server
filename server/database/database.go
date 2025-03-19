@@ -20,6 +20,8 @@ const (
 	SQLite DatabaseType = "sqlite"
 	// PostgreSQL database type
 	PostgreSQL DatabaseType = "postgres"
+	// GORM officially supports the databases MySQL, PostgreSQL, SQLite, SQL Server, and TiDB
+	// Other database types can be imported as needed
 )
 
 // Config holds database configuration
@@ -325,4 +327,77 @@ func (s *Service) GetActiveTransactionForConnector(chargePointID string, connect
 	}
 
 	return &transaction, nil
+}
+
+func (s *Service) GetLatestMeterValueForTransaction(transactionID int) ([]MeterValue, error) {
+	var meterValues []MeterValue
+	result := s.db.Where("transaction_id = ?", transactionID).
+		Order("timestamp desc").
+		Limit(20). // Get last 20 readings to ensure we have the right measurands
+		Find(&meterValues)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	return meterValues, nil
+}
+
+// GetIncompleteTransactions gets all incomplete transactions for a charge point
+func (s *Service) GetIncompleteTransactions(chargePointID string) ([]Transaction, error) {
+	var transactions []Transaction
+	result := s.db.Where("charge_point_id = ? AND is_complete = ?", chargePointID, false).
+		Find(&transactions)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	return transactions, nil
+}
+
+func (s *Service) GetTransactionsForPeriod(startDate, endDate time.Time) ([]Transaction, error) {
+	var transactions []Transaction
+
+	result := s.db.Where("(start_timestamp BETWEEN ? AND ?) OR (stop_timestamp BETWEEN ? AND ?)",
+		startDate, endDate, startDate, endDate).
+		Order("start_timestamp").
+		Find(&transactions)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	return transactions, nil
+}
+
+func (s *Service) GetAllIncompleteTransactions() ([]Transaction, error) {
+	var transactions []Transaction
+	result := s.db.Where("is_complete = ?", false).Find(&transactions)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	return transactions, nil
+}
+
+// MarkTransactionStopReason marks a transaction with a StopReason
+func (s *Service) MarkTransactionStopReason(transactionID int, reason string) error {
+	// Find transaktionen først
+	var transaction Transaction
+	result := s.db.First(&transaction, "transaction_id = ?", transactionID)
+	if result.Error != nil {
+		return result.Error
+	}
+
+	// Update only StopReason – no other fields
+	transaction.StopReason = reason
+
+	// Save changes
+	result = s.db.Model(&Transaction{}).
+		Where("transaction_id = ?", transactionID).
+		Update("stop_reason", reason)
+
+	return result.Error
 }

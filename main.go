@@ -14,32 +14,36 @@ import (
 )
 
 func main() {
-	// 1. Setup database configuration from environment variables
+	// Setup database configuration from environment variables
 	dbConfig := database.NewConfig()
 	log.Printf("Using database type: %s", dbConfig.Type)
 
-	// 2. Initialize database connection
+	// Initialize database connection
 	dbService, err := database.NewService(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	log.Println("Database connection established successfully")
 
-	// 3. Create OCPP server configuration
+	// Create OCPP server configuration
 	ocppConfig := ocppserver.NewConfig()
 	log.Printf("OCPP server configured with host: %s, WebSocket port: %d, API port: %d",
 		ocppConfig.Host, ocppConfig.WebSocketPort, ocppConfig.APIPort)
 
-	// 4. Create central system handler with database integration
-	var handler ocppserver.OCPPHandler
-	handler = ocppserver.NewCentralSystemHandlerWithDB(dbService)
+	// Create central system handler with database integration
+	var handler = ocppserver.NewCentralSystemHandlerWithDB(dbService)
 	log.Println("OCPP handler created with database integration")
 
-	// 5. Create and initialize OCPP server
+	// Create and initialize OCPP server
 	ocppServer := ocppserver.NewOCPPServer(ocppConfig, handler)
 	log.Println("OCPP server initialized")
 
-	// 6. Create and start API server with additional endpoints for database access
+	// Start background tasks for meter value collection and offline monitoring
+	ocppServer.StartMeterValuePolling(dbService)
+	ocppServer.StartOfflineTransactionCheck(dbService)
+	ocppServer.StartMeterValueBackup(dbService)
+
+	// Create and start API server with additional endpoints for database access
 	apiServer := server.NewAPIServerWithDB(ocppServer, ocppConfig, dbService)
 	if err := apiServer.Start(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
@@ -48,7 +52,7 @@ func main() {
 	// Wait a moment for server startup logs to complete
 	time.Sleep(100 * time.Millisecond)
 
-	// 7. Display server information
+	// Display server information
 	wsURL := fmt.Sprintf("ws://%s:%d", ocppConfig.Host, ocppConfig.WebSocketPort)
 	apiURL := fmt.Sprintf("http://%s:%d/api", ocppConfig.Host, ocppConfig.APIPort)
 
@@ -78,11 +82,13 @@ func main() {
 	fmt.Printf("  POST %s/commands/clear-cache           - Clear charge point cache\n", apiURL)
 	fmt.Printf("  POST %s/commands/trigger-message       - Trigger message from charge point\n", apiURL)
 	fmt.Printf("  POST %s/commands/generic               - Send any OCPP command\n", apiURL)
+	fmt.Printf("  POST %s/admin/close-transaction        - Administratively close a transaction\n", apiURL)
+	fmt.Printf("  GET  %s/reports/elrefusion             - Generate tax refund report\n", apiURL)
 
-	// 8. Setup graceful shutdown
+	// Setup graceful shutdown
 	setupGracefulShutdown(apiServer)
 
-	// 9. Keep server running until terminated
+	// Keep server running until terminated
 	apiServer.RunForever()
 }
 
