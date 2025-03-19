@@ -362,8 +362,6 @@ The server is structured into several modules:
   - Database service interface
   - SQLite and PostgreSQL implementations
 
-### Test
-
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
