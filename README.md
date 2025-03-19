@@ -362,55 +362,7 @@ The server is structured into several modules:
   - Database service interface
   - SQLite and PostgreSQL implementations
 
-## Deployment
-
-### AWS Deployment Recommendations
-
-1. **Container Orchestration**:
-   - Amazon ECS with Fargate for serverless container deployment
-   - Amazon EKS for Kubernetes-based deployment
-
-2. **Database Options**:
-   - Amazon RDS for PostgreSQL for production workloads
-   - Amazon Aurora for high-performance requirements
-
-3. **Network Configuration**:
-   - Use Application Load Balancer for routing traffic
-   - Configure security groups to allow traffic on ports 9000 and 9001
-   - Use AWS Certificate Manager for TLS certificates
-
-4. **Security**:
-   - Store secrets in AWS Secrets Manager
-   - Use IAM roles for service authentication
-
-5. **Monitoring**:
-   - CloudWatch for logs and metrics
-   - CloudWatch Alarms for automated monitoring
-
-### DigitalOcean Deployment Recommendations
-
-1. **Container Deployment**:
-   - DigitalOcean App Platform for fully managed deployment
-   - DigitalOcean Kubernetes (DOKS) for orchestration
-   - Droplets with Docker for direct VM deployment
-
-2. **Database Options**:
-   - DigitalOcean Managed PostgreSQL Database for production
-   - Database Clusters for high-availability requirements
-
-3. **Network Configuration**:
-   - DigitalOcean Load Balancers for distributing traffic
-   - Configure firewall rules to allow necessary ports
-   - Use Let's Encrypt for TLS certificates (available through DigitalOcean)
-
-4. **Security**:
-   - Use encrypted volumes for data storage
-   - Implement VPC networks for isolation
-   - Setup Cloud Firewalls to restrict access
-
-5. **Monitoring**:
-   - DigitalOcean Monitoring for metrics and alerts
-   - Integrate with DigitalOcean Monitoring API
+### Test
 
 ## Contributing
 
