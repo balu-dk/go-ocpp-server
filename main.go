@@ -53,19 +53,32 @@ func main() {
 	time.Sleep(100 * time.Millisecond)
 
 	// Display server information
-	wsURL := fmt.Sprintf("ws://%s:%d", ocppConfig.Host, ocppConfig.WebSocketPort)
-	apiURL := fmt.Sprintf("http://%s:%d/api", ocppConfig.Host, ocppConfig.APIPort)
+	protocol := "ws"
+	apiProtocol := "http"
+	if ocppConfig.UseTLS {
+		protocol = "wss"
+		apiProtocol = "https"
+	}
+
+	wsURL := fmt.Sprintf("%s://%s:%d", protocol, ocppConfig.Host, ocppConfig.WebSocketPort)
+	apiURL := fmt.Sprintf("%s://%s:%d/api", apiProtocol, ocppConfig.Host, ocppConfig.APIPort)
 
 	fmt.Println("\nOCPP Server started successfully")
 	fmt.Println("=================================")
 
 	fmt.Println("\nEnvironment variables used (if set):")
-	fmt.Println("  For OCPP server: OCPP_HOST, OCPP_WEBSOCKET_PORT, OCPP_API_PORT, OCPP_SYSTEM_NAME")
+	fmt.Println("  For OCPP server: OCPP_HOST, OCPP_WEBSOCKET_PORT, OCPP_API_PORT, OCPP_SYSTEM_NAME, OCPP_USE_TLS, OCPP_CERT_FILE, OCPP_KEY_FILE")
 	fmt.Println("  For Database: DB_TYPE, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, DB_SSL_MODE, DB_SQLITE_PATH")
 
 	fmt.Println("\nServer endpoints:")
 	fmt.Printf("  WebSocket endpoint: %s\n", wsURL)
 	fmt.Printf("  HTTP API endpoint: %s\n", apiURL)
+
+	if ocppConfig.UseTLS {
+		fmt.Println("\nTLS is enabled. Using certificate files:")
+		fmt.Printf("  Certificate file: %s\n", ocppConfig.CertFile)
+		fmt.Printf("  Key file: %s\n", ocppConfig.KeyFile)
+	}
 
 	fmt.Println("\nAvailable API endpoints:")
 	fmt.Printf("  GET  %s/status                         - Server status\n", apiURL)

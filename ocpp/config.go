@@ -3,6 +3,7 @@ package ocppserver
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 // Config contains configuration for the OCPP server
@@ -18,6 +19,16 @@ type Config struct {
 
 	// SystemName is the name of the central server
 	SystemName string
+
+	// TLS configuration
+	// UseTLS indicates whether to use TLS (HTTPS/WSS)
+	UseTLS bool
+
+	// CertFile is the path to the TLS certificate file
+	CertFile string
+
+	// KeyFile is the path to the TLS key file
+	KeyFile string
 }
 
 // NewConfig creates a new configuration with default values and environment variables
@@ -27,6 +38,9 @@ func NewConfig() *Config {
 		WebSocketPort: getEnvAsInt("OCPP_WEBSOCKET_PORT", 9000),
 		APIPort:       getEnvAsInt("OCPP_API_PORT", 9001),
 		SystemName:    getEnv("OCPP_SYSTEM_NAME", "ocpp-central"),
+		UseTLS:        getEnvAsBool("OCPP_USE_TLS", false),
+		CertFile:      getEnv("OCPP_CERT_FILE", "cert.pem"),
+		KeyFile:       getEnv("OCPP_KEY_FILE", "key.pem"),
 	}
 
 	return config
@@ -84,6 +98,21 @@ func getEnvAsInt(key string, defaultValue int) int {
 
 	var value int
 	_, err := fmt.Sscanf(valueStr, "%d", &value)
+	if err != nil {
+		return defaultValue
+	}
+
+	return value
+}
+
+// getEnvAsBool retrieves an environment variable as a boolean with a default value if it doesn't exist
+func getEnvAsBool(key string, defaultValue bool) bool {
+	valueStr := os.Getenv(key)
+	if valueStr == "" {
+		return defaultValue
+	}
+
+	value, err := strconv.ParseBool(valueStr)
 	if err != nil {
 		return defaultValue
 	}

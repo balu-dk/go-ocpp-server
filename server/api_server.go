@@ -128,10 +128,22 @@ func (s *APIServerWithDB) Start() error {
 
 	// Start HTTP API server
 	go func() {
-		apiURL := fmt.Sprintf("http://%s:%d", s.config.Host, s.config.APIPort)
+		protocol := "http"
+		if s.config.UseTLS {
+			protocol = "https"
+		}
+
+		apiURL := fmt.Sprintf("%s://%s:%d", protocol, s.config.Host, s.config.APIPort)
 		log.Printf("HTTP API server listening on %s\n", apiURL)
 
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if s.config.UseTLS {
+			err = s.httpServer.ListenAndServeTLS(s.config.CertFile, s.config.KeyFile)
+		} else {
+			err = s.httpServer.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start HTTP server: %v", err)
 		}
 	}()

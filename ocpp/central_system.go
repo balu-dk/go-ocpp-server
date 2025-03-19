@@ -38,10 +38,23 @@ func NewOCPPServer(config *Config, handler OCPPHandler) *OCPPServer {
 func (s *OCPPServer) Start() error {
 	// Start the server in a goroutine
 	go func() {
-		wsURL := fmt.Sprintf("ws://%s:%d", s.config.Host, s.config.WebSocketPort)
+		protocol := "ws"
+		if s.config.UseTLS {
+			protocol = "wss"
+		}
+
+		serverAddr := fmt.Sprintf(":%d", s.config.WebSocketPort)
+		wsURL := fmt.Sprintf("%s://%s%s", protocol, s.config.Host, serverAddr)
 		log.Printf("OCPP Central System listening on %s", wsURL)
 
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if s.config.UseTLS {
+			err = s.server.ListenAndServeTLS(s.config.CertFile, s.config.KeyFile)
+		} else {
+			err = s.server.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed: %v", err)
 		}
 	}()
