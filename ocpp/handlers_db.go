@@ -491,12 +491,12 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 			cp.Status = status
 			cp.UpdatedAt = time.Now()
 			if err := cs.dbService.SaveChargePoint(cp); err != nil {
-				log.Printf("Fejl ved opdatering af ladestander status: %v", err)
-				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Fejl ved opdatering af ladestander status: %v", err))
+				log.Printf("Error updating charge point status: %v", err)
+				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error updating charge point status: %v", err))
 			}
 		} else {
-			log.Printf("Ladestander ikke fundet for status opdatering: %s", chargePointID)
-			cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Ladestander ikke fundet for status opdatering: %s", chargePointID))
+			log.Printf("Charge point not found for status update: %s", chargePointID)
+			cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Charge point not found for status update: %s", chargePointID))
 		}
 	} else {
 		// Update or create connector
@@ -525,7 +525,7 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 
 	// Log status change
 	cs.logEvent(chargePointID, "INFO", "ChargePoint",
-		fmt.Sprintf("Status ændring for connector %d: %s, ErrorCode: %s", connectorId, status, errorCode))
+		fmt.Sprintf("Status change for connector %d: %s, ErrorCode: %s", connectorId, status, errorCode))
 
 	// Extra handling for statuses that indicates a complete transaction
 	if connectorId > 0 && (status == "Available" || status == "Faulted") {
@@ -534,14 +534,14 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 		if err == nil && tx != nil {
 			// Connector is Available but there's an incomplete transaction
 			cs.logEvent(chargePointID, "WARNING", "System",
-				fmt.Sprintf("Connector %d er %s men har ufuldstændig transaktion %d. Vil anmode om målerværdier og lukke.",
+				fmt.Sprintf("Connector %d is %s but has incomplete transaction %d. Will request meter values and close.",
 					connectorId, status, tx.TransactionID))
 
 			// Request final meter values for this transaction
 			_, err = cs.GetCommandManager().TriggerMessage(chargePointID, "MeterValues", &connectorId)
 			if err != nil {
 				cs.logEvent(chargePointID, "ERROR", "System",
-					fmt.Sprintf("Fejl ved anmodning om målerværdier for connector %d: %v", connectorId, err))
+					fmt.Sprintf("Error requesting meter values for connector %d: %v", connectorId, err))
 			}
 
 			// Close transaction after meter values
@@ -553,7 +553,7 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 				updatedTx, err := cs.dbService.GetTransaction(txID)
 				if err != nil {
 					cs.logEvent(chargePointID, "ERROR", "System",
-						fmt.Sprintf("Kunne ikke hente transaktion %d: %v", txID, err))
+						fmt.Sprintf("Could not retrieve transaction %d: %v", txID, err))
 					return
 				}
 
@@ -561,7 +561,7 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 				meterValues, err := cs.dbService.GetLatestMeterValueForTransaction(txID)
 				if err != nil {
 					cs.logEvent(chargePointID, "WARNING", "System",
-						fmt.Sprintf("Ingen målerværdier fundet for transaktion %d. Bruger senest kendte værdi.", txID))
+						fmt.Sprintf("No meter values found for transaction %d. Using last known value.", txID))
 				}
 
 				// Close transaction
@@ -593,10 +593,10 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 
 				if err := cs.dbService.UpdateTransaction(updatedTx); err != nil {
 					cs.logEvent(chargePointID, "ERROR", "System",
-						fmt.Sprintf("Fejl ved lukning af transaktion %d: %v", txID, err))
+						fmt.Sprintf("Error closing transaction %d: %v", txID, err))
 				} else {
 					cs.logEvent(chargePointID, "INFO", "System",
-						fmt.Sprintf("Successfully lukkede transaktion %d efter offline periode. Energi leveret: %.2f kWh",
+						fmt.Sprintf("Successfully closed transaction %d after offline period. Energy delivered: %.2f kWh",
 							txID, updatedTx.EnergyDelivered))
 				}
 			}(tx.TransactionID)

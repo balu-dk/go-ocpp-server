@@ -384,7 +384,7 @@ func (s *Service) GetAllIncompleteTransactions() ([]Transaction, error) {
 
 // MarkTransactionStopReason marks a transaction with a StopReason
 func (s *Service) MarkTransactionStopReason(transactionID int, reason string) error {
-	// Find transaktionen først
+	// Find the transaction first
 	var transaction Transaction
 	result := s.db.First(&transaction, "transaction_id = ?", transactionID)
 	if result.Error != nil {
