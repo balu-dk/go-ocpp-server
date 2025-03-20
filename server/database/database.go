@@ -284,30 +284,6 @@ func (s *Service) GetLogs(chargePointID string, level string, limit int, offset 
 	return logs, nil
 }
 
-// getEnv gets environment variable with fallback
-func getEnv(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return defaultValue
-}
-
-// getEnvAsInt gets environment variable as int with fallback
-func getEnvAsInt(key string, defaultValue int) int {
-	valueStr := os.Getenv(key)
-	if valueStr == "" {
-		return defaultValue
-	}
-
-	var value int
-	_, err := fmt.Sscanf(valueStr, "%d", &value)
-	if err != nil {
-		return defaultValue
-	}
-
-	return value
-}
-
 // GetActiveTransactionForConnector finds the active transaction for a specific charge point and connector
 func (s *Service) GetActiveTransactionForConnector(chargePointID string, connectorID int) (*Transaction, error) {
 	var transaction Transaction
