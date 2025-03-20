@@ -251,7 +251,7 @@
             params.append('offset', currentOffset);
             
             try {
-                const response = await fetch(`/api/raw-logs?${params.toString()}`);
+                const response = await fetch(`http://localhost:9001/api/raw-logs?${params.toString()}`);
                 if (!response.ok) {
                     throw new Error(`HTTP error ${response.status}`);
                 }
