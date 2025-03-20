@@ -21,8 +21,12 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:-securepassword}
       - DB_NAME=${DB_NAME:-ocpp_server}
       - DB_SSL_MODE=${DB_SSL_MODE:-require}
+      - OCPP_USE_TLS=true
+      - OCPP_CERT_FILE=/etc/letsencrypt/live/ocpp.dk/fullchain.pem
+      - OCPP_KEY_FILE=/etc/letsencrypt/live/ocpp.dk/privkey.pem
     volumes:
       - ocpp-data:/app/data
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://localhost:9001/api/status"]
