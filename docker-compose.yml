@@ -1,10 +1,29 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: ocpp_server
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   ocpp-server:
     build:
       context: .
       dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "9000:9000"  # OCPP WebSocket port
       - "9001:9001"  # API port
@@ -14,15 +33,17 @@ services:
       - OCPP_API_PORT=9001
       - OCPP_SYSTEM_NAME=ocpp-central
       - OCPP_HEARTBEAT_INTERVAL=60
-      # DigitalOcean Managed PostgreSQL Configuration
-      - DB_HOST=your-db-host.db.ondigitalocean.com
-      - DB_PORT=25060
-      - DB_USER=doadmin
-      - DB_PASSWORD=your-db-password
-      - DB_NAME=defaultdb
-      - DB_SSL_MODE=require
+      # PostgreSQL Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=ocpp_server
+      - DB_SSL_MODE=disable
     volumes:
       - ocpp-data:/app/data
+      - ./logs:/app/logs
+      - ./.env.example:/app/.env
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://localhost:9001/api/status"]
@@ -32,4 +53,5 @@ services:
       start_period: 5s
 
 volumes:
+  postgres-data:
   ocpp-data:

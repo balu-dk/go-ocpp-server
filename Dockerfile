@@ -3,7 +3,7 @@ FROM golang:1.21-alpine AS builder
 # Set working directory
 WORKDIR /build
 
-# Install necessary dependencies for PostgreSQL only
+# Install necessary dependencies for PostgreSQL
 RUN apk add --no-cache gcc musl-dev postgresql-dev
 
 # Copy go.mod and go.sum files to download dependencies
@@ -21,17 +21,24 @@ RUN CGO_ENABLED=1 GOOS=linux go build -a -o ocpp-server .
 # Create a minimal production image
 FROM alpine:latest
 
-# Install only PostgreSQL client libraries
-RUN apk add --no-cache ca-certificates tzdata postgresql-client libpq wget
+# Install only PostgreSQL client libraries and other necessary tools
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    postgresql-client \
+    libpq \
+    wget \
+    curl
 
 # Set working directory
 WORKDIR /app
 
 # Create data directories
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/logs
 
 # Copy the binary from the builder stage
 COPY --from=builder /build/ocpp-server /app/
+COPY --from=builder /build/.env.example /app/.env.example
 
 # Create a non-root user to run the application
 RUN addgroup -S ocpp && adduser -S -g ocpp ocpp
@@ -57,8 +64,9 @@ ENV DB_SSL_MODE=disable
 # Expose ports
 EXPOSE 9000 9001
 
-# Set the volume mount point for persistent data
+# Set the volume mount points for persistent data
 VOLUME /app/data
+VOLUME /app/logs
 
 # Set entrypoint
 ENTRYPOINT ["/app/ocpp-server"]
