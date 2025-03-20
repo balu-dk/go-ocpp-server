@@ -15,7 +15,6 @@ services:
       - OCPP_SYSTEM_NAME=ocpp-central
       - OCPP_HEARTBEAT_INTERVAL=60
       # External Database configuration (required for all logging)
-      - DB_TYPE=postgres
       - DB_HOST=${DB_HOST:-database.example.com}
       - DB_PORT=${DB_PORT:-5432}
       - DB_USER=${DB_USER:-postgres}
