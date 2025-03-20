@@ -3,8 +3,11 @@ FROM golang:1.21-alpine AS builder
 # Set working directory
 WORKDIR /build
 
-# Install necessary dependencies for PostgreSQL
-RUN apk add --no-cache gcc musl-dev postgresql-dev
+# Install necessary build dependencies
+RUN apk add --no-cache \
+    gcc \
+    musl-dev \
+    postgresql-dev
 
 # Copy go.mod and go.sum files to download dependencies
 COPY go.mod go.sum ./
@@ -15,18 +18,16 @@ RUN go mod download
 # Copy the rest of the application code
 COPY . .
 
-# Build the application with PostgreSQL support
+# Build the application
 RUN CGO_ENABLED=1 GOOS=linux go build -a -o ocpp-server .
 
 # Create a minimal production image
 FROM alpine:latest
 
-# Install only PostgreSQL client libraries and other necessary tools
+# Install runtime dependencies
 RUN apk add --no-cache \
     ca-certificates \
     tzdata \
-    postgresql-client \
-    libpq \
     wget \
     curl
 
@@ -47,19 +48,11 @@ RUN chown -R ocpp:ocpp /app
 # Use the non-root user
 USER ocpp
 
-# Set environment variables with sensible defaults for Docker
+# Set environment variables with sensible defaults
 ENV OCPP_HOST=0.0.0.0
 ENV OCPP_WEBSOCKET_PORT=9000
 ENV OCPP_API_PORT=9001
 ENV OCPP_SYSTEM_NAME=ocpp-central
-
-# PostgreSQL configuration
-ENV DB_HOST=postgres
-ENV DB_PORT=5432
-ENV DB_USER=postgres
-ENV DB_PASSWORD=postgres
-ENV DB_NAME=ocpp_server
-ENV DB_SSL_MODE=disable
 
 # Expose ports
 EXPOSE 9000 9001
