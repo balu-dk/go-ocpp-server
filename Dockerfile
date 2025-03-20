@@ -47,7 +47,6 @@ ENV OCPP_API_PORT=9001
 ENV OCPP_SYSTEM_NAME=ocpp-central
 
 # PostgreSQL configuration
-ENV DB_TYPE=postgres
 ENV DB_HOST=postgres
 ENV DB_PORT=5432
 ENV DB_USER=postgres

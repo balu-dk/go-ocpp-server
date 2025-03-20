@@ -15,7 +15,6 @@ services:
       - OCPP_SYSTEM_NAME=ocpp-central
       - OCPP_HEARTBEAT_INTERVAL=60
       # DigitalOcean Managed PostgreSQL Configuration
-      - DB_TYPE=postgres
       - DB_HOST=your-db-host.db.ondigitalocean.com
       - DB_PORT=25060
       - DB_USER=doadmin
