@@ -68,7 +68,7 @@ func main() {
 
 	fmt.Println("\nEnvironment variables used (if set):")
 	fmt.Println("  For OCPP server: OCPP_HOST, OCPP_WEBSOCKET_PORT, OCPP_API_PORT, OCPP_SYSTEM_NAME, OCPP_USE_TLS, OCPP_CERT_FILE, OCPP_KEY_FILE")
-	fmt.Println("  For Database: DB_TYPE, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, DB_SSL_MODE, DB_SQLITE_PATH")
+	fmt.Println("  For Database: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, DB_SSL_MODE")
 
 	fmt.Println("\nServer endpoints:")
 	fmt.Printf("  WebSocket endpoint: %s\n", wsURL)

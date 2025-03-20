@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -16,8 +15,6 @@ import (
 type DatabaseType string
 
 const (
-	// SQLite database type
-	SQLite DatabaseType = "sqlite"
 	// PostgreSQL database type
 	PostgreSQL DatabaseType = "postgres"
 	// GORM officially supports the databases MySQL, PostgreSQL, SQLite, SQL Server, and TiDB
@@ -33,22 +30,18 @@ type Config struct {
 	Password     string
 	DatabaseName string
 	SSLMode      string
-	SQLitePath   string
 }
 
 // NewConfig creates a new database configuration with values from environment variables
 func NewConfig() *Config {
-	dbType := DatabaseType(getEnv("DB_TYPE", string(SQLite)))
-
 	return &Config{
-		Type:         dbType,
+		Type:         PostgreSQL,
 		Host:         getEnv("DB_HOST", "localhost"),
 		Port:         getEnvAsInt("DB_PORT", 5432),
 		User:         getEnv("DB_USER", "postgres"),
 		Password:     getEnv("DB_PASSWORD", "postgres"),
 		DatabaseName: getEnv("DB_NAME", "ocpp_server"),
 		SSLMode:      getEnv("DB_SSL_MODE", "disable"),
-		SQLitePath:   getEnv("DB_SQLITE_PATH", "ocpp_server.db"),
 	}
 }
 
@@ -58,7 +51,7 @@ type Service struct {
 	dbConfig *Config
 }
 
-// NewService creates a new database service
+// NewService creates a new database service with PostgreSQL
 func NewService(config *Config) (*Service, error) {
 	var db *gorm.DB
 	var err error
@@ -74,27 +67,24 @@ func NewService(config *Config) (*Service, error) {
 		},
 	)
 
-	// Connect to the appropriate database type
-	switch config.Type {
-	case PostgreSQL:
-		dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-			config.Host, config.Port, config.User, config.Password, config.DatabaseName, config.SSLMode)
-		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-			Logger: newLogger,
-		})
-	case SQLite:
-		db, err = gorm.Open(sqlite.Open(config.SQLitePath), &gorm.Config{
-			Logger: newLogger,
-		})
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", config.Type)
-	}
+	// Connect to PostgreSQL database
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		config.Host, config.Port, config.User, config.Password, config.DatabaseName, config.SSLMode)
+
+	log.Printf("Connecting to PostgreSQL database at %s:%d...", config.Host, config.Port)
+
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: newLogger,
+	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
+		return nil, fmt.Errorf("failed to connect to PostgreSQL database: %w", err)
 	}
 
+	log.Println("Successfully connected to PostgreSQL database")
+
 	// Auto migrate the schema
+	log.Println("Migrating database schema...")
 	err = db.AutoMigrate(
 		&ChargePoint{},
 		&Connector{},
@@ -106,6 +96,7 @@ func NewService(config *Config) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to migrate database schema: %w", err)
 	}
+	log.Println("Database schema migration complete")
 
 	return &Service{db: db, dbConfig: config}, nil
 }
@@ -115,9 +106,9 @@ func (s *Service) GetDB() *gorm.DB {
 	return s.db
 }
 
-// GetDatabaseType returns the type of database being used
+// GetDatabaseType returns the type of database being used (always PostgreSQL)
 func (s *Service) GetDatabaseType() DatabaseType {
-	return s.dbConfig.Type
+	return PostgreSQL
 }
 
 // SaveChargePoint creates or updates a charge point in the database
