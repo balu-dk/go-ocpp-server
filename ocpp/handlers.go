@@ -91,10 +91,20 @@ func (cs *CentralSystemHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 }
 
 // GetCommandManager returns the command manager
+func (cs *CentralSystemHandlerWithDB) GetCommandManager() *CommandManager {
+	// Initialize command manager once if it doesn't exist
+	cs.cmdMgrInit.Do(func() {
+		cs.commandManager = NewCommandManager(cs.clients, cs.dbService)
+	})
+	return cs.commandManager
+}
+
+// GetCommandManager returns the command manager
 func (cs *CentralSystemHandler) GetCommandManager() *CommandManager {
 	// Initialize command manager once if it doesn't exist
 	cs.cmdMgrInit.Do(func() {
-		cs.commandManager = NewCommandManager(cs.clients)
+		// Since CentralSystemHandler doesn't have a dbService, pass nil
+		cs.commandManager = NewCommandManager(cs.clients, nil)
 	})
 	return cs.commandManager
 }

@@ -1,9 +1,11 @@
 package ocppserver
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"ocpp-server/server/database"
 	"sync"
 	"time"
 
@@ -18,15 +20,20 @@ type CommandManager struct {
 	requestTimeouts  map[string]*time.Timer
 	mutex            sync.Mutex // To synchronize access to maps
 	defaultTimeoutMs int
+	dbLogger         *DatabaseMessageLogger
 }
 
 // NewCommandManager creates a new command manager
-func NewCommandManager(clients map[string]*websocket.Conn) *CommandManager {
+func NewCommandManager(clients map[string]*websocket.Conn, dbService *database.Service) *CommandManager {
+	// Create the command manager with database logger
+	dbLogger := NewDatabaseMessageLogger(dbService)
+
 	return &CommandManager{
 		clients:          clients,
 		pendingRequests:  make(map[string]chan interface{}),
 		requestTimeouts:  make(map[string]*time.Timer),
 		defaultTimeoutMs: 30000, // 30 seconds default timeout
+		dbLogger:         dbLogger,
 	}
 }
 
@@ -69,6 +76,16 @@ func (cm *CommandManager) SendCommand(chargePointID string, action string, paylo
 	cm.requestTimeouts[messageID] = timer
 	cm.mutex.Unlock()
 
+	// Log the outgoing command using the database logger
+	if cm.dbLogger != nil {
+		messageJSON, err := json.Marshal(ocppMessage)
+		if err == nil {
+			if err := cm.dbLogger.LogRawMessage("SEND", chargePointID, messageJSON); err != nil {
+				log.Printf("Error logging raw message: %v", err)
+			}
+		}
+	}
+
 	// Send the message
 	if err := conn.WriteJSON(ocppMessage); err != nil {
 		// Clean up if sending fails
@@ -89,6 +106,17 @@ func (cm *CommandManager) SendCommand(chargePointID string, action string, paylo
 	response, ok := <-responseChan
 	if !ok {
 		return nil, fmt.Errorf("command timed out after %d ms", cm.defaultTimeoutMs)
+	}
+
+	// Log the received response using the database logger
+	if cm.dbLogger != nil {
+		responseMessage := []interface{}{3, messageID, response} // 3 = CallResult
+		responseJSON, err := json.Marshal(responseMessage)
+		if err == nil {
+			if err := cm.dbLogger.LogRawMessage("RECV", chargePointID, responseJSON); err != nil {
+				log.Printf("Error logging raw message: %v", err)
+			}
+		}
 	}
 
 	return response, nil

@@ -78,3 +78,15 @@ type Authorization struct {
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
+
+// RawMessageLog represents a raw OCPP message log entry
+type RawMessageLog struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	ChargePointID string    `json:"chargePointId"`
+	Timestamp     time.Time `json:"timestamp"`
+	Direction     string    `json:"direction"`                // "SEND" or "RECV"
+	MessageType   string    `json:"messageType,omitempty"`    // "Request", "Response", "Error"
+	Action        string    `json:"action,omitempty"`         // OCPP action like "BootNotification", "Heartbeat", etc.
+	MessageID     string    `json:"messageId,omitempty"`      // Unique ID of the message
+	Message       string    `gorm:"type:text" json:"message"` // Full message content as JSON
+}

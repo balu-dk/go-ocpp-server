@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCPP Raw Message Logs</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            margin-top: 0;
+        }
+        .filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .filter-item {
+            flex-grow: 1;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .log-list {
+            margin-top: 20px;
+        }
+        .log-item {
+            margin-bottom: 15px;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #ddd;
+        }
+        .log-send {
+            background-color: #e8f4f8;
+            border-left-color: #3498db;
+        }
+        .log-recv {
+            background-color: #f8f5e8;
+            border-left-color: #f39c12;
+        }
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .log-timestamp {
+            color: #666;
+        }
+        .log-direction {
+            font-weight: bold;
+        }
+        .log-direction.send {
+            color: #3498db;
+        }
+        .log-direction.recv {
+            color: #f39c12;
+        }
+        .log-charge-point {
+            font-weight: bold;
+        }
+        .log-message {
+            background-color: #f9f9f9;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .log-action {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            background-color: #e0e0e0;
+            font-size: 12px;
+        }
+        .pagination {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        .pagination button {
+            margin: 0 5px;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            font-style: italic;
+            color: #666;
+        }
+        .no-logs {
+            text-align: center;
+            padding: 30px;
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>OCPP Raw Message Logs</h1>
+        
+        <!-- Filters -->
+        <div class="filters">
+            <div class="filter-item">
+                <label for="chargePointId">Charge Point ID</label>
+                <input type="text" id="chargePointId" placeholder="e.g., CP001">
+            </div>
+            <div class="filter-item">
+                <label for="direction">Direction</label>
+                <select id="direction">
+                    <option value="">All</option>
+                    <option value="SEND">Sent</option>
+                    <option value="RECV">Received</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label for="action">Action</label>
+                <select id="action">
+                    <option value="">All</option>
+                    <option value="BootNotification">BootNotification</option>
+                    <option value="Heartbeat">Heartbeat</option>
+                    <option value="Authorize">Authorize</option>
+                    <option value="StartTransaction">StartTransaction</option>
+                    <option value="StopTransaction">StopTransaction</option>
+                    <option value="MeterValues">MeterValues</option>
+                    <option value="StatusNotification">StatusNotification</option>
+                    <option value="Reset">Reset</option>
+                    <option value="UnlockConnector">UnlockConnector</option>
+                    <option value="GetConfiguration">GetConfiguration</option>
+                    <option value="ChangeConfiguration">ChangeConfiguration</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label for="transactionId">Transaction ID</label>
+                <input type="number" id="transactionId" placeholder="e.g., 12345">
+            </div>
+            <div class="filter-item">
+                <label for="limit">Limit</label>
+                <select id="limit">
+                    <option value="10">10</option>
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label>&nbsp;</label>
+                <button id="applyFilters">Apply Filters</button>
+            </div>
+        </div>
+        
+        <!-- Log List -->
+        <div id="logList" class="log-list">
+            <div class="loading">Loading logs...</div>
+        </div>
+        
+        <!-- Pagination -->
+        <div class="pagination">
+            <button id="prevPage" disabled>Previous</button>
+            <button id="nextPage">Next</button>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let currentOffset = 0;
+        let currentLimit = 50;
+        let hasMoreLogs = true;
+        
+        // DOM Elements
+        const chargePointIdInput = document.getElementById('chargePointId');
+        const directionSelect = document.getElementById('direction');
+        const actionSelect = document.getElementById('action');
+        const transactionIdInput = document.getElementById('transactionId');
+        const limitSelect = document.getElementById('limit');
+        const applyFiltersButton = document.getElementById('applyFilters');
+        const logListContainer = document.getElementById('logList');
+        const prevPageButton = document.getElementById('prevPage');
+        const nextPageButton = document.getElementById('nextPage');
+        
+        // Set initial limit from select
+        currentLimit = parseInt(limitSelect.value);
+        
+        // Helper functions
+        function formatTimestamp(timestamp) {
+            const date = new Date(timestamp);
+            return date.toLocaleString();
+        }
+        
+        function formatJson(jsonString) {
+            try {
+                const obj = JSON.parse(jsonString);
+                return JSON.stringify(obj, null, 2);
+            } catch (e) {
+                return jsonString;
+            }
+        }
+        
+        // Fetch and display logs
+        async function fetchLogs() {
+            logListContainer.innerHTML = '<div class="loading">Loading logs...</div>';
+            
+            // Build query params
+            const params = new URLSearchParams();
+            if (chargePointIdInput.value) params.append('chargePointId', chargePointIdInput.value);
+            if (directionSelect.value) params.append('direction', directionSelect.value);
+            if (actionSelect.value) params.append('action', actionSelect.value);
+            if (transactionIdInput.value) params.append('transactionId', transactionIdInput.value);
+            params.append('limit', currentLimit);
+            params.append('offset', currentOffset);
+            
+            try {
+                const response = await fetch(`/api/raw-logs?${params.toString()}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                // Update pagination state
+                hasMoreLogs = data.logs.length >= currentLimit;
+                prevPageButton.disabled = currentOffset === 0;
+                nextPageButton.disabled = !hasMoreLogs;
+                
+                // Render logs
+                if (data.logs.length === 0) {
+                    logListContainer.innerHTML = '<div class="no-logs">No logs found matching your criteria</div>';
+                    return;
+                }
+                
+                let html = '';
+                for (const log of data.logs) {
+                    const directionClass = log.direction === 'SEND' ? 'send' : 'recv';
+                    const logClass = log.direction === 'SEND' ? 'log-send' : 'log-recv';
+                    
+                    html += `
+                        <div class="log-item ${logClass}">
+                            <div class="log-header">
+                                <div>
+                                    <span class="log-direction ${directionClass}">${log.direction}</span>
+                                    <span class="log-charge-point">${log.chargePointId}</span>
+                                    ${log.action ? `<span class="log-action">${log.action}</span>` : ''}
+                                    ${log.messageType ? `<small>[${log.messageType}]</small>` : ''}
+                                </div>
+                                <div class="log-timestamp">${formatTimestamp(log.timestamp)}</div>
+                            </div>
+                            <div class="log-message">${formatJson(log.message)}</div>
+                        </div>
+                    `;
+                }
+                
+                logListContainer.innerHTML = html;
+                
+            } catch (error) {
+                console.error('Error fetching logs:', error);
+                logListContainer.innerHTML = `<div class="no-logs">Error loading logs: ${error.message}</div>`;
+            }
+        }
+        
+        // Event listeners
+        applyFiltersButton.addEventListener('click', () => {
+            currentOffset = 0;
+            currentLimit = parseInt(limitSelect.value);
+            fetchLogs();
+        });
+        
+        prevPageButton.addEventListener('click', () => {
+            currentOffset = Math.max(0, currentOffset - currentLimit);
+            fetchLogs();
+        });
+        
+        nextPageButton.addEventListener('click', () => {
+            currentOffset += currentLimit;
+            fetchLogs();
+        });
+        
+        // Initial load
+        fetchLogs();
+    </script>
+</body>
+</html>

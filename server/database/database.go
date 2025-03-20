@@ -6,6 +6,8 @@ import (
 	"os"
 	"time"
 
+	env "ocpp-server/utils"
+
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -36,12 +38,12 @@ type Config struct {
 func NewConfig() *Config {
 	return &Config{
 		Type:         PostgreSQL,
-		Host:         getEnv("DB_HOST", "localhost"),
-		Port:         getEnvAsInt("DB_PORT", 5432),
-		User:         getEnv("DB_USER", "postgres"),
-		Password:     getEnv("DB_PASSWORD", "postgres"),
-		DatabaseName: getEnv("DB_NAME", "ocpp_server"),
-		SSLMode:      getEnv("DB_SSL_MODE", "disable"),
+		Host:         env.GetEnv("DB_HOST", "localhost"),
+		Port:         env.GetEnvAsInt("DB_PORT", 5432),
+		User:         env.GetEnv("DB_USER", "postgres"),
+		Password:     env.GetEnv("DB_PASSWORD", "postgres"),
+		DatabaseName: env.GetEnv("DB_NAME", "ocpp_server"),
+		SSLMode:      env.GetEnv("DB_SSL_MODE", "disable"),
 	}
 }
 
@@ -92,6 +94,7 @@ func NewService(config *Config) (*Service, error) {
 		&MeterValue{},
 		&Log{},
 		&Authorization{},
+		&RawMessageLog{}, // Add the new raw message log model
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to migrate database schema: %w", err)
@@ -391,4 +394,88 @@ func (s *Service) MarkTransactionStopReason(transactionID int, reason string) er
 		Update("stop_reason", reason)
 
 	return result.Error
+}
+
+// SaveRawMessageLog saves a raw message log to the database
+func (s *Service) SaveRawMessageLog(rawLog *RawMessageLog) error {
+	// Check if raw message logging is enabled
+	if !env.GetEnvAsBool("OCPP_RAW_LOGGING", true) {
+		return nil
+	}
+
+	// Save to database
+	result := s.db.Create(rawLog)
+	return result.Error
+}
+
+// GetRawMessageLogs retrieves raw message logs with optional filters
+func (s *Service) GetRawMessageLogs(chargePointID string, direction string, action string, limit int, offset int) ([]RawMessageLog, error) {
+	db := s.db
+
+	if chargePointID != "" {
+		db = db.Where("charge_point_id = ?", chargePointID)
+	}
+
+	if direction != "" {
+		db = db.Where("direction = ?", direction)
+	}
+
+	if action != "" {
+		db = db.Where("action = ?", action)
+	}
+
+	var logs []RawMessageLog
+	result := db.Order("timestamp desc").Limit(limit).Offset(offset).Find(&logs)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	return logs, nil
+}
+
+// GetRawMessageLogsForTransaction retrieves all raw message logs related to a specific transaction
+func (s *Service) GetRawMessageLogsForTransaction(transactionID int) ([]RawMessageLog, error) {
+	// First get the transaction to find its charge point and timeframe
+	var transaction Transaction
+	result := s.db.First(&transaction, "transaction_id = ?", transactionID)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	// Query logs for this transaction's timeframe and charge point
+	var logs []RawMessageLog
+	query := s.db.Where("charge_point_id = ? AND timestamp >= ?",
+		transaction.ChargePointID, transaction.StartTimestamp)
+
+	if !transaction.StopTimestamp.IsZero() {
+		// If transaction is complete, add end time filter
+		query = query.Where("timestamp <= ?", transaction.StopTimestamp)
+	}
+
+	// Execute query
+	result = query.Order("timestamp").Find(&logs)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	return logs, nil
+}
+
+// CleanupOldRawMessageLogs removes raw message logs older than the specified retention period
+func (s *Service) CleanupOldRawMessageLogs(retentionDays int) error {
+	if retentionDays <= 0 {
+		return nil // No cleanup if retention is disabled
+	}
+
+	cutoffDate := time.Now().AddDate(0, 0, -retentionDays)
+	result := s.db.Where("timestamp < ?", cutoffDate).Delete(&RawMessageLog{})
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	log.Printf("Cleaned up %d old raw message logs (older than %d days)",
+		result.RowsAffected, retentionDays)
+
+	return nil
 }

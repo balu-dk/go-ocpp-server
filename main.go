@@ -11,9 +11,13 @@ import (
 	ocppserver "ocpp-server/ocpp"
 	"ocpp-server/server"
 	"ocpp-server/server/database"
+	env "ocpp-server/utils"
 )
 
 func main() {
+	// Load environment variables from .env file
+	env.Initialize()
+
 	// Setup database configuration from environment variables
 	dbConfig := database.NewConfig()
 	log.Printf("Using database type: %s", dbConfig.Type)

@@ -117,6 +117,9 @@ func (s *APIServerWithDB) registerAPIEndpoints(mux *http.ServeMux) {
 
 	//  Endpoint for energy reports
 	mux.HandleFunc("/api/reports/energy", s.handleEnergyReport)
+
+	// Endpoint for raw message logs
+	mux.HandleFunc("/api/raw-logs", s.handleRawMessageLogs)
 }
 
 // Start initiates the API server
@@ -664,5 +667,75 @@ func (s *APIServerWithDB) handleEnergyReport(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf("attachment; filename=energy-report-%s-to-%s.json", startDateStr, endDateStr))
 
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleRawMessageLogs handles requests to retrieve raw OCPP message logs
+func (s *APIServerWithDB) handleRawMessageLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse query parameters
+	chargePointID := r.URL.Query().Get("chargePointId")
+	direction := r.URL.Query().Get("direction")
+	action := r.URL.Query().Get("action")
+	transactionIDStr := r.URL.Query().Get("transactionId")
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+
+	// Default limit and offset
+	limit := 50
+	if limitStr != "" {
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	offset := 0
+	if offsetStr != "" {
+		parsedOffset, err := strconv.Atoi(offsetStr)
+		if err == nil && parsedOffset >= 0 {
+			offset = parsedOffset
+		}
+	}
+
+	var logs []database.RawMessageLog
+	var err error
+
+	// If transaction ID is provided, get logs for that transaction
+	if transactionIDStr != "" {
+		transactionID, err := strconv.Atoi(transactionIDStr)
+		if err != nil {
+			http.Error(w, "Invalid transactionId parameter", http.StatusBadRequest)
+			return
+		}
+
+		logs, err = s.dbService.GetRawMessageLogsForTransaction(transactionID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error fetching raw logs for transaction: %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Otherwise, get logs with filters
+		logs, err = s.dbService.GetRawMessageLogs(chargePointID, direction, action, limit, offset)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error fetching raw logs: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Add total count for pagination
+	response := struct {
+		Count int                      `json:"count"`
+		Logs  []database.RawMessageLog `json:"logs"`
+	}{
+		Count: len(logs),
+		Logs:  logs,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }

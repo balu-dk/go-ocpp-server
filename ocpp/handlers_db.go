@@ -23,10 +23,14 @@ type CentralSystemHandlerWithDB struct {
 	dbService      *database.Service
 	commandManager *CommandManager
 	cmdMgrInit     sync.Once
+	dbLogger       *DatabaseMessageLogger
 }
 
 // NewCentralSystemHandlerWithDB creates a new handler with database integration
 func NewCentralSystemHandlerWithDB(dbService *database.Service) *CentralSystemHandlerWithDB {
+	// Create a database message logger
+	dbLogger := NewDatabaseMessageLogger(dbService)
+
 	return &CentralSystemHandlerWithDB{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -37,21 +41,13 @@ func NewCentralSystemHandlerWithDB(dbService *database.Service) *CentralSystemHa
 		},
 		clients:   make(map[string]*websocket.Conn),
 		dbService: dbService,
+		dbLogger:  dbLogger, // Use the database logger
 	}
 }
 
 // ServeHTTP implements the http.Handler interface
 func (cs *CentralSystemHandlerWithDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cs.HandleWebSocket(w, r)
-}
-
-// GetCommandManager returns the command manager
-func (cs *CentralSystemHandlerWithDB) GetCommandManager() *CommandManager {
-	// Initialize command manager once if it doesn't exist
-	cs.cmdMgrInit.Do(func() {
-		cs.commandManager = NewCommandManager(cs.clients)
-	})
-	return cs.commandManager
 }
 
 // HandleWebSocket handles WebSocket connections from charge points
@@ -108,6 +104,13 @@ func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string,
 			log.Printf("Error reading message: %v", err)
 			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error reading message: %v", err))
 			break
+		}
+
+		// Log the raw incoming message
+		if cs.dbLogger != nil {
+			if err := cs.dbLogger.LogRawMessage("RECV", chargePointID, message); err != nil {
+				log.Printf("Error logging raw message: %v", err)
+			}
 		}
 
 		// Parse OCPP message
@@ -222,6 +225,15 @@ func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string,
 
 			// Send response back (CallResult)
 			callResult := []interface{}{3, uniqueID, response} // 3 = CallResult
+
+			// Log the outgoing response
+			responseJSON, err := json.Marshal(callResult)
+			if err == nil && cs.dbLogger != nil {
+				if err := cs.dbLogger.LogRawMessage("SEND", chargePointID, responseJSON); err != nil {
+					log.Printf("Error logging raw message: %v", err)
+				}
+			}
+
 			if err := conn.WriteJSON(callResult); err != nil {
 				log.Printf("Error sending response: %v", err)
 				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error sending response: %v", err))

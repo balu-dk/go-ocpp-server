@@ -2,6 +2,7 @@ package ocppserver
 
 import (
 	"fmt"
+	env "ocpp-server/utils"
 	"os"
 	"strconv"
 )
@@ -34,13 +35,13 @@ type Config struct {
 // NewConfig creates a new configuration with default values and environment variables
 func NewConfig() *Config {
 	config := &Config{
-		Host:          getEnv("OCPP_HOST", "localhost"),
-		WebSocketPort: getEnvAsInt("OCPP_WEBSOCKET_PORT", 9000),
-		APIPort:       getEnvAsInt("OCPP_API_PORT", 9001),
-		SystemName:    getEnv("OCPP_SYSTEM_NAME", "ocpp-central"),
-		UseTLS:        getEnvAsBool("OCPP_USE_TLS", false),
-		CertFile:      getEnv("OCPP_CERT_FILE", "cert.pem"),
-		KeyFile:       getEnv("OCPP_KEY_FILE", "key.pem"),
+		Host:          env.GetEnv("OCPP_HOST", "localhost"),
+		WebSocketPort: env.GetEnvAsInt("OCPP_WEBSOCKET_PORT", 9000),
+		APIPort:       env.GetEnvAsInt("OCPP_API_PORT", 9001),
+		SystemName:    env.GetEnv("OCPP_SYSTEM_NAME", "ocpp-central"),
+		UseTLS:        env.GetEnvAsBool("OCPP_USE_TLS", false),
+		CertFile:      env.GetEnv("OCPP_CERT_FILE", "cert.pem"),
+		KeyFile:       env.GetEnv("OCPP_KEY_FILE", "key.pem"),
 	}
 
 	return config
