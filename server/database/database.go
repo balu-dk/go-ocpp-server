@@ -374,12 +374,6 @@ func (s *Service) MarkTransactionStopReason(transactionID int, reason string) er
 
 // SaveRawMessageLog saves a raw message log to the database
 func (s *Service) SaveRawMessageLog(rawLog *RawMessageLog) error {
-	// Check if raw message logging is enabled
-	if !env.GetEnvAsBool("OCPP_RAW_LOGGING", true) {
-		return nil
-	}
-
-	// Save to database
 	result := s.db.Create(rawLog)
 	return result.Error
 }
@@ -435,23 +429,4 @@ func (s *Service) GetRawMessageLogsForTransaction(transactionID int) ([]RawMessa
 	}
 
 	return logs, nil
-}
-
-// CleanupOldRawMessageLogs removes raw message logs older than the specified retention period
-func (s *Service) CleanupOldRawMessageLogs(retentionDays int) error {
-	if retentionDays <= 0 {
-		return nil // No cleanup if retention is disabled
-	}
-
-	cutoffDate := time.Now().AddDate(0, 0, -retentionDays)
-	result := s.db.Where("timestamp < ?", cutoffDate).Delete(&RawMessageLog{})
-
-	if result.Error != nil {
-		return result.Error
-	}
-
-	log.Printf("Cleaned up %d old raw message logs (older than %d days)",
-		result.RowsAffected, retentionDays)
-
-	return nil
 }

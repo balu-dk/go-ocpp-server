@@ -15,6 +15,9 @@ import (
 )
 
 func main() {
+	// Set up basic logging to stdout only (logs will primarily go to DB)
+	log.SetOutput(os.Stdout)
+
 	// Load environment variables from .env file
 	env.Initialize()
 

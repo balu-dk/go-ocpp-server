@@ -4,61 +4,45 @@ import (
 	"encoding/json"
 	"log"
 	"ocpp-server/server/database"
-	env "ocpp-server/utils"
 	"sync"
 	"time"
 )
 
 // DatabaseMessageLogger logs OCPP messages to the database
 type DatabaseMessageLogger struct {
-	dbService           *database.Service
-	enabled             bool
-	mutex               sync.Mutex
-	messageQueue        []database.RawMessageLog
-	maxQueueSize        int
-	flushInterval       time.Duration
-	retentionDays       int
-	lastCleanupTime     time.Time
-	cleanupIntervalDays int
+	dbService     *database.Service
+	enabled       bool
+	mutex         sync.Mutex
+	messageQueue  []database.RawMessageLog
+	maxQueueSize  int
+	flushInterval time.Duration
 }
 
 // NewDatabaseMessageLogger creates a new logger for raw OCPP messages
 // that stores messages in the database
 func NewDatabaseMessageLogger(dbService *database.Service) *DatabaseMessageLogger {
-	// Check if logging is enabled via environment variable
-	enabled := env.GetEnvAsBool("OCPP_RAW_LOGGING", true)
+	// Always enable logging
+	enabled := true
 
-	// Get queue size from environment (default 100)
-	maxQueueSize := env.GetEnvAsInt("OCPP_LOG_QUEUE_SIZE", 100)
+	// Fixed queue size
+	maxQueueSize := 100
 
-	// Get flush interval from environment (default 10 seconds)
-	flushIntervalSec := env.GetEnvAsInt("OCPP_LOG_FLUSH_INTERVAL", 10)
-
-	// Get retention period from environment (default 30 days, 0 = keep forever)
-	retentionDays := env.GetEnvAsInt("OCPP_LOG_RETENTION_DAYS", 30)
-
-	// Get cleanup interval from environment (default 1 day)
-	cleanupIntervalDays := env.GetEnvAsInt("OCPP_LOG_CLEANUP_INTERVAL", 1)
+	// Fixed flush interval (10 seconds)
+	flushIntervalSec := 10
 
 	logger := &DatabaseMessageLogger{
-		dbService:           dbService,
-		enabled:             enabled,
-		messageQueue:        make([]database.RawMessageLog, 0, maxQueueSize),
-		maxQueueSize:        maxQueueSize,
-		flushInterval:       time.Duration(flushIntervalSec) * time.Second,
-		retentionDays:       retentionDays,
-		cleanupIntervalDays: cleanupIntervalDays,
-		lastCleanupTime:     time.Now(),
+		dbService:     dbService,
+		enabled:       enabled,
+		messageQueue:  make([]database.RawMessageLog, 0, maxQueueSize),
+		maxQueueSize:  maxQueueSize,
+		flushInterval: time.Duration(flushIntervalSec) * time.Second,
 	}
 
-	// Start background goroutines if logging is enabled
-	if enabled {
-		// Start background goroutine for periodic flushing
-		go logger.periodicFlush()
+	// Start background goroutine for periodic flushing
+	go logger.periodicFlush()
 
-		// Log startup
-		log.Printf("Raw OCPP message logging to database enabled (retention: %d days)", retentionDays)
-	}
+	// Log startup
+	log.Printf("Database logging enabled")
 
 	return logger
 }
@@ -70,14 +54,6 @@ func (l *DatabaseMessageLogger) periodicFlush() {
 
 	for range ticker.C {
 		l.flushQueue()
-
-		// Check if we should run cleanup
-		if l.retentionDays > 0 && time.Since(l.lastCleanupTime) >= time.Duration(l.cleanupIntervalDays)*24*time.Hour {
-			if err := l.dbService.CleanupOldRawMessageLogs(l.retentionDays); err != nil {
-				log.Printf("Error cleaning up old raw message logs: %v", err)
-			}
-			l.lastCleanupTime = time.Now()
-		}
 	}
 }
 
@@ -120,10 +96,6 @@ func (l *DatabaseMessageLogger) flushQueue() {
 
 // LogRawMessage logs a raw OCPP message to the database
 func (l *DatabaseMessageLogger) LogRawMessage(direction string, chargePointID string, message []byte) error {
-	if !l.enabled {
-		return nil
-	}
-
 	// Extract metadata from the message for easier filtering
 	var messageType, action, messageID string
 	var msgObj []interface{}
@@ -182,10 +154,6 @@ func (l *DatabaseMessageLogger) LogRawMessage(direction string, chargePointID st
 
 // Close flushes any pending messages and closes the logger
 func (l *DatabaseMessageLogger) Close() error {
-	if !l.enabled {
-		return nil
-	}
-
 	// Flush any remaining messages
 	l.flushQueue()
 

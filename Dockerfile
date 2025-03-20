@@ -29,13 +29,14 @@ RUN apk add --no-cache \
     ca-certificates \
     tzdata \
     wget \
-    curl
+    curl \
+    postgresql-client
 
 # Set working directory
 WORKDIR /app
 
-# Create data directories
-RUN mkdir -p /app/data /app/logs
+# Create data directory (for any non-log data the app might need)
+RUN mkdir -p /app/data
 
 # Copy the binary from the builder stage
 COPY --from=builder /build/ocpp-server /app/
@@ -57,9 +58,8 @@ ENV OCPP_SYSTEM_NAME=ocpp-central
 # Expose ports
 EXPOSE 9000 9001
 
-# Set the volume mount points for persistent data
+# Set the volume mount point for persistent data
 VOLUME /app/data
-VOLUME /app/logs
 
 # Set entrypoint
 ENTRYPOINT ["/app/ocpp-server"]

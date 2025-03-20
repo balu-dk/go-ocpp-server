@@ -14,20 +14,17 @@ services:
       - OCPP_API_PORT=9001
       - OCPP_SYSTEM_NAME=ocpp-central
       - OCPP_HEARTBEAT_INTERVAL=60
-      # Database configuration should be set externally
-      - DB_HOST=host.docker.internal
-      - DB_PORT=5432
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
-      - DB_NAME=ocpp_server
-      - DB_SSL_MODE=disable
+      # External Database configuration (required for all logging)
+      - DB_TYPE=postgres
+      - DB_HOST=${DB_HOST:-database.example.com}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-securepassword}
+      - DB_NAME=${DB_NAME:-ocpp_server}
+      - DB_SSL_MODE=${DB_SSL_MODE:-require}
     volumes:
       - ocpp-data:/app/data
-      - ./logs:/app/logs
-      - ./.env:/app/.env
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://localhost:9001/api/status"]
       interval: 30s
