@@ -11,7 +11,6 @@ import (
 // DatabaseMessageLogger logs OCPP messages to the database
 type DatabaseMessageLogger struct {
 	dbService     *database.Service
-	enabled       bool
 	mutex         sync.Mutex
 	messageQueue  []database.RawMessageLog
 	maxQueueSize  int
@@ -19,20 +18,18 @@ type DatabaseMessageLogger struct {
 }
 
 // NewDatabaseMessageLogger creates a new logger for raw OCPP messages
-// that stores messages in the database
+// that stores messages in the database immediately
 func NewDatabaseMessageLogger(dbService *database.Service) *DatabaseMessageLogger {
 	// Always enable logging
-	enabled := true
 
-	// Fixed queue size
-	maxQueueSize := 100
+	// Small queue size for better immediacy (max 20 messages before forced flush)
+	maxQueueSize := 20
 
-	// Fixed flush interval (10 seconds)
-	flushIntervalSec := 10
+	// Very short flush interval (2 seconds)
+	flushIntervalSec := 2
 
 	logger := &DatabaseMessageLogger{
 		dbService:     dbService,
-		enabled:       enabled,
 		messageQueue:  make([]database.RawMessageLog, 0, maxQueueSize),
 		maxQueueSize:  maxQueueSize,
 		flushInterval: time.Duration(flushIntervalSec) * time.Second,
@@ -42,7 +39,7 @@ func NewDatabaseMessageLogger(dbService *database.Service) *DatabaseMessageLogge
 	go logger.periodicFlush()
 
 	// Log startup
-	log.Printf("Database logging enabled")
+	log.Printf("Database logging enabled with immediate write prioritization")
 
 	return logger
 }
@@ -74,19 +71,10 @@ func (l *DatabaseMessageLogger) flushQueue() {
 	// Release the lock before DB operations
 	l.mutex.Unlock()
 
-	// Save messages in batches
-	batchSize := 20
-	for i := 0; i < len(messagesToSave); i += batchSize {
-		end := i + batchSize
-		if end > len(messagesToSave) {
-			end = len(messagesToSave)
-		}
-
-		batch := messagesToSave[i:end]
-		for _, msg := range batch {
-			if err := l.dbService.SaveRawMessageLog(&msg); err != nil {
-				log.Printf("Error saving raw message log to database: %v", err)
-			}
+	// Save all messages immediately, without batching
+	for _, msg := range messagesToSave {
+		if err := l.dbService.SaveRawMessageLog(&msg); err != nil {
+			log.Printf("Error saving raw message log to database: %v", err)
 		}
 	}
 
@@ -94,7 +82,7 @@ func (l *DatabaseMessageLogger) flushQueue() {
 	l.mutex.Lock()
 }
 
-// LogRawMessage logs a raw OCPP message to the database
+// LogRawMessage logs a raw OCPP message to the database immediately
 func (l *DatabaseMessageLogger) LogRawMessage(direction string, chargePointID string, message []byte) error {
 	// Extract metadata from the message for easier filtering
 	var messageType, action, messageID string
@@ -138,6 +126,24 @@ func (l *DatabaseMessageLogger) LogRawMessage(direction string, chargePointID st
 		Message:       string(message),
 	}
 
+	// Try to save directly to database first for high-priority messages
+	if direction == "RECV" && (action == "BootNotification" || action == "Heartbeat" || action == "StatusNotification") {
+		// For important messages, save directly to DB
+		if err := l.dbService.SaveRawMessageLog(&logEntry); err != nil {
+			log.Printf("Error directly saving raw message log to database: %v", err)
+			// Fall back to queue on error
+			l.queueMessage(logEntry)
+		}
+		return nil
+	}
+
+	// For other messages, use the queue mechanism
+	l.queueMessage(logEntry)
+	return nil
+}
+
+// queueMessage adds a message to the queue
+func (l *DatabaseMessageLogger) queueMessage(logEntry database.RawMessageLog) {
 	// Add to queue
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
@@ -148,8 +154,6 @@ func (l *DatabaseMessageLogger) LogRawMessage(direction string, chargePointID st
 	if len(l.messageQueue) >= l.maxQueueSize {
 		go l.flushQueue()
 	}
-
-	return nil
 }
 
 // Close flushes any pending messages and closes the logger
