@@ -289,7 +289,13 @@ func (s *OCPPServer) StartConnectionMonitoring(dbService *database.Service) {
 						heartbeatThreshold = time.Duration(intervalSeconds*2.5) * time.Second
 					}
 
-					heartbeatTooOld := time.Since(cp.LastHeartbeat) > heartbeatThreshold
+					heartbeatTooOld := false
+					timeSinceLastHeartbeat := time.Since(cp.LastHeartbeat)
+					timeSinceLastBoot := time.Since(cp.LastBootNotification)
+
+					if timeSinceLastBoot > heartbeatThreshold {
+						heartbeatTooOld = timeSinceLastHeartbeat > heartbeatThreshold
+					}
 
 					// If it's marked as connected in DB but either:
 					// 1. Not in the clients map, or
