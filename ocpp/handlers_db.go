@@ -445,6 +445,7 @@ func (cs *CentralSystemHandlerWithDB) getConfiguredHeartbeatInterval() int {
 }
 
 // handleHeartbeatRequestWithDB handles a Heartbeat request with database integration
+// In your handleHeartbeatRequestWithDB function
 func (cs *CentralSystemHandlerWithDB) handleHeartbeatRequestWithDB(chargePointID string) map[string]interface{} {
 	fmt.Printf("Heartbeat from %s\n", chargePointID)
 
@@ -454,6 +455,7 @@ func (cs *CentralSystemHandlerWithDB) handleHeartbeatRequestWithDB(chargePointID
 	if err == nil {
 		cp.LastHeartbeat = now
 		cp.UpdatedAt = now
+		cp.IsConnected = true // Set to true whenever a heartbeat is received
 		if err := cs.dbService.SaveChargePoint(cp); err != nil {
 			log.Printf("Error updating charge point heartbeat: %v", err)
 			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error updating charge point heartbeat: %v", err))
