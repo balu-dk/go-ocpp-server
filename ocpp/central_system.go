@@ -246,3 +246,250 @@ func (s *OCPPServer) StartMeterValueBackup(dbService *database.Service) {
 		}
 	}()
 }
+
+// StartConnectionMonitoring starts a background process to verify connections
+// and update the database when charge points disconnect
+func (s *OCPPServer) StartConnectionMonitoring(dbService *database.Service) {
+	go func() {
+		// Check connections every 60 seconds
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Get command manager to access connections
+				cmdMgr := s.GetHandler().GetCommandManager()
+				if cmdMgr == nil {
+					continue
+				}
+
+				// Get all charge points marked as connected in the database
+				chargePoints, err := dbService.ListConnectedChargePoints()
+				if err != nil {
+					log.Printf("Error fetching connected charge points: %v", err)
+					continue
+				}
+
+				for _, cp := range chargePoints {
+					// Check if the charge point is still connected in the clients map
+					isReallyConnected := false
+
+					// Use a mutex to safely check the clients map
+					cmdMgr.LockClients()
+					conn, exists := cmdMgr.GetClient(cp.ID)
+					isReallyConnected = exists && conn != nil
+					cmdMgr.UnlockClients()
+
+					// Additionally, check when the last heartbeat was received
+					heartbeatThreshold := 2 * time.Minute
+					if cp.HeartbeatInterval > 0 {
+						// Use 2.5 times the heartbeat interval as a threshold
+						intervalSeconds := float64(cp.HeartbeatInterval)
+						heartbeatThreshold = time.Duration(intervalSeconds*2.5) * time.Second
+					}
+
+					heartbeatTooOld := time.Since(cp.LastHeartbeat) > heartbeatThreshold
+
+					// If it's marked as connected in DB but either:
+					// 1. Not in the clients map, or
+					// 2. Hasn't sent a heartbeat in too long
+					// Then mark it as disconnected
+					if !isReallyConnected || heartbeatTooOld {
+						reason := "Connection not found in active clients"
+						if heartbeatTooOld {
+							reason = fmt.Sprintf("No heartbeat received in %v", time.Since(cp.LastHeartbeat).Round(time.Second))
+						}
+
+						log.Printf("Marking charge point %s as disconnected: %s", cp.ID, reason)
+
+						// Update database
+						cp.IsConnected = false
+						cp.UpdatedAt = time.Now()
+						if err := dbService.SaveChargePoint(&cp); err != nil {
+							log.Printf("Error updating charge point connection status: %v", err)
+						}
+
+						// Log the event
+						dbService.AddLog(&database.Log{
+							ChargePointID: cp.ID,
+							Timestamp:     time.Now(),
+							Level:         "WARNING",
+							Source:        "System",
+							Message:       fmt.Sprintf("Charge point marked as disconnected: %s", reason),
+						})
+
+						// Check for incomplete transactions and log a warning
+						incompleteTransactions, err := dbService.GetIncompleteTransactions(cp.ID)
+						if err == nil && len(incompleteTransactions) > 0 {
+							dbService.AddLog(&database.Log{
+								ChargePointID: cp.ID,
+								Timestamp:     time.Now(),
+								Level:         "WARNING",
+								Source:        "System",
+								Message:       fmt.Sprintf("Charge point disconnected with %d incomplete transactions", len(incompleteTransactions)),
+							})
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	log.Println("Connection monitoring started")
+}
+
+// StartStatusMonitoring starts a background process to periodically request status updates
+// from all connected charge points
+func (s *OCPPServer) StartStatusMonitoring(dbService *database.Service) {
+	go func() {
+		// Check status every 5 minutes
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Get all charge points
+				chargePoints, err := dbService.ListChargePoints()
+				if err != nil {
+					log.Printf("Error fetching charge points for status monitoring: %v", err)
+					continue
+				}
+
+				for _, cp := range chargePoints {
+					// Skip offline charge points
+					if !cp.IsConnected {
+						continue
+					}
+
+					// Get all connectors for this charge point
+					connectors, err := dbService.ListConnectors(cp.ID)
+					if err != nil {
+						log.Printf("Error fetching connectors for %s: %v", cp.ID, err)
+						continue
+					}
+
+					// Request status for each connector including the charge point itself (connector 0)
+					cmdMgr := s.GetHandler().GetCommandManager()
+					if cmdMgr == nil {
+						continue
+					}
+
+					// Request status for connector 0 (charge point overall status)
+					connectorZero := 0
+					_, err = cmdMgr.TriggerMessage(cp.ID, "StatusNotification", &connectorZero)
+					if err != nil {
+						log.Printf("Failed to trigger status notification for %s connector 0: %v",
+							cp.ID, err)
+					}
+
+					// Request status for each individual connector
+					for _, connector := range connectors {
+						connectorID := connector.ConnectorID
+						go func(cpID string, connID int) {
+							_, err := cmdMgr.TriggerMessage(cpID, "StatusNotification", &connID)
+							if err != nil {
+								log.Printf("Failed to trigger status notification for %s connector %d: %v",
+									cpID, connID, err)
+							}
+
+							// If connector is in Charging state, also request meter values
+							if connector.Status == "Charging" {
+								_, err := cmdMgr.TriggerMessage(cpID, "MeterValues", &connID)
+								if err != nil {
+									log.Printf("Failed to trigger meter values for %s connector %d: %v",
+										cpID, connID, err)
+								}
+							}
+						}(cp.ID, connectorID)
+
+						// Small delay to prevent flooding the charge point
+						time.Sleep(500 * time.Millisecond)
+					}
+				}
+
+				// Also expire old pending remote starts
+				expirationTime := 30 * time.Minute
+				if err := dbService.ExpireOldPendingRemoteStarts(expirationTime); err != nil {
+					log.Printf("Error expiring old pending remote starts: %v", err)
+				}
+			}
+		}
+	}()
+
+	log.Println("Status monitoring started")
+}
+
+// StartOrphanedSessionDetection starts a background process to detect and report
+// connectors that are in "Charging" state but have no associated transaction
+func (s *OCPPServer) StartOrphanedSessionDetection(dbService *database.Service) {
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute) // Check every 10 minutes
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Get all charge points
+				chargePoints, err := dbService.ListChargePoints()
+				if err != nil {
+					log.Printf("Error fetching charge points for orphaned session check: %v", err)
+					continue
+				}
+
+				for _, cp := range chargePoints {
+					// Skip offline charge points
+					if !cp.IsConnected {
+						continue
+					}
+
+					// Get all connectors for this charge point
+					connectors, err := dbService.ListConnectors(cp.ID)
+					if err != nil {
+						log.Printf("Error fetching connectors for %s: %v", cp.ID, err)
+						continue
+					}
+
+					for _, connector := range connectors {
+						// Only check connectors in "Charging" state
+						if connector.Status != "Charging" {
+							continue
+						}
+
+						// Check if there's an active transaction for this connector
+						_, err := dbService.GetActiveTransactionForConnector(cp.ID, connector.ConnectorID)
+						if err != nil {
+							// Potential orphaned charging session detected
+							log.Printf("WARNING: Connector %d on %s appears to be charging, but no transaction exists",
+								connector.ConnectorID, cp.ID)
+
+							// Log the issue
+							dbService.AddLog(&database.Log{
+								ChargePointID: cp.ID,
+								Timestamp:     time.Now(),
+								Level:         "WARNING",
+								Source:        "System",
+								Message: fmt.Sprintf(
+									"Potential orphaned charging session detected: Connector %d is in 'Charging' state but has no active transaction",
+									connector.ConnectorID),
+							})
+
+							// Try to trigger a StatusNotification to see if status is really "Charging"
+							connID := connector.ConnectorID
+							if cmdMgr := s.GetHandler().GetCommandManager(); cmdMgr != nil {
+								_, err := cmdMgr.TriggerMessage(cp.ID, "StatusNotification", &connID)
+								if err != nil {
+									log.Printf("Error triggering status notification for %s connector %d: %v",
+										cp.ID, connID, err)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	log.Println("Orphaned charging session detection started")
+}

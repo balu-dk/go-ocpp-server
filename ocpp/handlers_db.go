@@ -24,6 +24,7 @@ type CentralSystemHandlerWithDB struct {
 	commandManager *CommandManager
 	cmdMgrInit     sync.Once
 	dbLogger       *DatabaseMessageLogger
+	mutex          sync.Mutex // Add this field
 }
 
 // NewCentralSystemHandlerWithDB creates a new handler with database integration
@@ -92,9 +93,36 @@ func extractChargePointIDFromURL(path string) string {
 func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string, conn *websocket.Conn) {
 	defer func() {
 		conn.Close()
-		delete(cs.clients, chargePointID)
-		cs.updateChargePointConnection(chargePointID, false)
-		cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("Connection closed for %s", chargePointID))
+
+		// Remove from clients map using the CommandManager's locking
+		cmdMgr := cs.GetCommandManager()
+		if cmdMgr != nil {
+			cmdMgr.LockClients()
+			delete(cmdMgr.clients, chargePointID)
+			cmdMgr.UnlockClients()
+		}
+
+		// Update database to show charge point is disconnected
+		cp, err := cs.dbService.GetChargePoint(chargePointID)
+		if err == nil {
+			cp.IsConnected = false
+			cp.UpdatedAt = time.Now()
+			if err := cs.dbService.SaveChargePoint(cp); err != nil {
+				log.Printf("Error updating charge point connection status: %v", err)
+			}
+		}
+
+		// Check for incomplete transactions
+		incompleteTransactions, err := cs.dbService.GetIncompleteTransactions(chargePointID)
+		var incompleteCount = 0
+		if err == nil {
+			incompleteCount = len(incompleteTransactions)
+		}
+
+		// Log the disconnection
+		cs.logEvent(chargePointID, "INFO", "System",
+			fmt.Sprintf("Connection closed for %s. Incomplete transactions: %d",
+				chargePointID, incompleteCount))
 	}()
 
 	for {
@@ -497,7 +525,7 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 
 	// Update connector status in database
 	if connectorId == 0 {
-		// Conntor 0 should be the Charge Point itself according to OCPP
+		// Connector 0 should be the Charge Point itself according to OCPP
 		cp, err := cs.dbService.GetChargePoint(chargePointID)
 		if err == nil {
 			cp.Status = status
@@ -538,6 +566,16 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 	// Log status change
 	cs.logEvent(chargePointID, "INFO", "ChargePoint",
 		fmt.Sprintf("Status change for connector %d: %s, ErrorCode: %s", connectorId, status, errorCode))
+
+	// Detect charging connector without a transaction
+	if connectorId > 0 && status == "Charging" {
+		// Check if there's an active transaction for this connector
+		_, err := cs.dbService.GetActiveTransactionForConnector(chargePointID, connectorId)
+		if err != nil {
+			// No transaction exists for a charging connector
+			cs.handleUnexpectedChargingStatus(chargePointID, connectorId)
+		}
+	}
 
 	// Extra handling for statuses that indicates a complete transaction
 	if connectorId > 0 && (status == "Available" || status == "Faulted") {
@@ -615,7 +653,7 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 		}
 	}
 
-	// StatusNotification kræver et tomt svar ifølge OCPP specifikationen
+	// StatusNotification requires an empty response according to the OCPP specification
 	return map[string]interface{}{}
 }
 
@@ -687,6 +725,18 @@ func (cs *CentralSystemHandlerWithDB) handleStartTransactionRequestWithDB(charge
 	// Log the transaction start
 	cs.logEvent(chargePointID, "INFO", "System",
 		fmt.Sprintf("Transaction %d started on connector %d with idTag %s", transactionId, connectorId, idTag))
+
+	pendingStart, _ := cs.dbService.GetPendingRemoteStart(chargePointID, connectorId)
+	if pendingStart != nil {
+		// Mark the pending remote start as completed
+		if err := cs.dbService.MarkPendingRemoteStartAsCompleted(chargePointID, connectorId, transactionId); err != nil {
+			log.Printf("Warning: Failed to mark pending remote start as completed: %v", err)
+		} else {
+			cs.logEvent(chargePointID, "INFO", "System",
+				fmt.Sprintf("Linked transaction %d to pending remote start request for connector %d, idTag %s",
+					transactionId, connectorId, pendingStart.IdTag))
+		}
+	}
 
 	return map[string]interface{}{
 		"idTagInfo": map[string]interface{}{
@@ -885,4 +935,81 @@ func (cs *CentralSystemHandlerWithDB) handleMeterValuesRequestWithDB(chargePoint
 
 	// MeterValues requires an empty response according to the OCPP spec
 	return map[string]interface{}{}
+}
+
+// handleUnexpectedChargingStatus handles the case when a connector reports Charging
+// but we have no transaction record for it
+func (cs *CentralSystemHandlerWithDB) handleUnexpectedChargingStatus(chargePointID string, connectorId int) {
+	// First check if there's a pending remote start that might explain this
+	pendingStart, err := cs.dbService.GetPendingRemoteStart(chargePointID, connectorId)
+	if err == nil && pendingStart != nil {
+		// We have a pending remote start, but no transaction was registered
+		cs.logEvent(chargePointID, "WARNING", "System",
+			fmt.Sprintf("Connector %d is charging but StartTransaction was not received. We have a pending remote start with idTag %s.",
+				connectorId, pendingStart.IdTag))
+
+		// Create a transaction with the information we have
+		transactionID := int(time.Now().Unix() % 100000)
+		transaction := &database.Transaction{
+			TransactionID:  transactionID,
+			ChargePointID:  chargePointID,
+			ConnectorID:    connectorId,
+			IdTag:          pendingStart.IdTag, // Use the ID tag from pending remote start
+			StartTimestamp: pendingStart.RequestTime,
+			MeterStart:     0, // We don't know the start value
+			IsComplete:     false,
+		}
+
+		if err := cs.dbService.CreateTransaction(transaction); err != nil {
+			cs.logEvent(chargePointID, "ERROR", "System",
+				fmt.Sprintf("Failed to create transaction for pending remote start: %v", err))
+		} else {
+			cs.logEvent(chargePointID, "INFO", "System",
+				fmt.Sprintf("Created transaction %d for pending remote start on connector %d",
+					transactionID, connectorId))
+
+			// Mark pending remote start as completed
+			if err := cs.dbService.MarkPendingRemoteStartAsCompleted(chargePointID, connectorId, transactionID); err != nil {
+				cs.logEvent(chargePointID, "WARNING", "System",
+					fmt.Sprintf("Failed to mark pending remote start as completed: %v", err))
+			}
+		}
+
+		return
+	}
+
+	// No pending remote start found, this is truly an unexpected charging session
+	cs.logEvent(chargePointID, "WARNING", "System",
+		fmt.Sprintf("Connector %d reports 'Charging' status but no active transaction or pending remote start exists.",
+			connectorId))
+
+	// Try to request meter values to get more information
+	_, err = cs.GetCommandManager().TriggerMessage(chargePointID, "MeterValues", &connectorId)
+	if err != nil {
+		cs.logEvent(chargePointID, "ERROR", "System",
+			fmt.Sprintf("Failed to request meter values for connector %d: %v", connectorId, err))
+	}
+
+	// Create a placeholder transaction with an unknown ID tag
+	transactionID := int(time.Now().Unix() % 100000)
+	idTag := "UNKNOWN_" + time.Now().Format("20060102_150405")
+
+	transaction := &database.Transaction{
+		TransactionID:  transactionID,
+		ChargePointID:  chargePointID,
+		ConnectorID:    connectorId,
+		IdTag:          idTag,
+		StartTimestamp: time.Now(),
+		MeterStart:     0,
+		IsComplete:     false,
+	}
+
+	if err := cs.dbService.CreateTransaction(transaction); err != nil {
+		cs.logEvent(chargePointID, "ERROR", "System",
+			fmt.Sprintf("Failed to create placeholder transaction: %v", err))
+	} else {
+		cs.logEvent(chargePointID, "INFO", "System",
+			fmt.Sprintf("Created placeholder transaction %d for unexpected charging session on connector %d",
+				transactionID, connectorId))
+	}
 }

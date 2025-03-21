@@ -466,3 +466,19 @@ func (cm *CommandManager) CancelReservation(chargePointID string, reservationID 
 func (cm *CommandManager) SendGenericCommand(chargePointID string, action string, payload map[string]interface{}) (interface{}, error) {
 	return cm.SendCommand(chargePointID, action, payload)
 }
+
+// LockClients acquires the mutex to safely access the clients map
+func (cm *CommandManager) LockClients() {
+	cm.mutex.Lock()
+}
+
+// UnlockClients releases the mutex
+func (cm *CommandManager) UnlockClients() {
+	cm.mutex.Unlock()
+}
+
+// GetClient safely gets a client connection by ID (must call LockClients/UnlockClients around this)
+func (cm *CommandManager) GetClient(chargePointID string) (*websocket.Conn, bool) {
+	conn, exists := cm.clients[chargePointID]
+	return conn, exists
+}

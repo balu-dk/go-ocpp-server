@@ -94,7 +94,8 @@ func NewService(config *Config) (*Service, error) {
 		&MeterValue{},
 		&Log{},
 		&Authorization{},
-		&RawMessageLog{}, // Add the new raw message log model
+		&RawMessageLog{},
+		&PendingRemoteStart{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to migrate database schema: %w", err)
@@ -429,4 +430,63 @@ func (s *Service) GetRawMessageLogsForTransaction(transactionID int) ([]RawMessa
 	}
 
 	return logs, nil
+}
+
+// SavePendingRemoteStart saves a pending remote start to the database
+func (s *Service) SavePendingRemoteStart(pendingStart *PendingRemoteStart) error {
+	result := s.db.Save(pendingStart)
+	return result.Error
+}
+
+// GetPendingRemoteStart finds an active pending remote start for a charge point and connector
+func (s *Service) GetPendingRemoteStart(chargePointID string, connectorID int) (*PendingRemoteStart, error) {
+	var pending PendingRemoteStart
+	// Look for a pending remote start that is not completed or expired
+	result := s.db.Where("charge_point_id = ? AND connector_id = ? AND completed = ? AND expired = ?",
+		chargePointID, connectorID, false, false).
+		Order("request_time desc").
+		First(&pending)
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &pending, nil
+}
+
+// MarkPendingRemoteStartAsCompleted marks a pending remote start as completed with a transaction ID
+func (s *Service) MarkPendingRemoteStartAsCompleted(chargePointID string, connectorID int, transactionID int) error {
+	// Find pending remote start
+	pending, err := s.GetPendingRemoteStart(chargePointID, connectorID)
+	if err != nil {
+		return err
+	}
+
+	// Update it
+	pending.Completed = true
+	pending.TransactionID = &transactionID
+
+	return s.SavePendingRemoteStart(pending)
+}
+
+// ExpireOldPendingRemoteStarts marks old pending remote starts as expired
+func (s *Service) ExpireOldPendingRemoteStarts(expirationTime time.Duration) error {
+	// Calculate cutoff time
+	cutoffTime := time.Now().Add(-expirationTime)
+
+	// Update all old pending remote starts that aren't completed yet
+	result := s.db.Model(&PendingRemoteStart{}).
+		Where("request_time < ? AND completed = ? AND expired = ?", cutoffTime, false, false).
+		Updates(map[string]interface{}{"expired": true})
+
+	return result.Error
+}
+
+// ListConnectedChargePoints retrieves all charge points that are marked as connected
+func (s *Service) ListConnectedChargePoints() ([]ChargePoint, error) {
+	var chargePoints []ChargePoint
+	result := s.db.Find(&chargePoints, "is_connected = ?", true)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return chargePoints, nil
 }

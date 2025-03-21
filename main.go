@@ -50,6 +50,18 @@ func main() {
 	ocppServer.StartOfflineTransactionCheck(dbService)
 	ocppServer.StartMeterValueBackup(dbService)
 
+	// Start connection monitoring to detect disconnected charge points
+	ocppServer.StartConnectionMonitoring(dbService)
+	log.Println("Connection monitoring started")
+
+	// Start status monitoring to regularly request updates from charge points
+	ocppServer.StartStatusMonitoring(dbService)
+	log.Println("Status monitoring started")
+
+	// Start orphaned charging session detection
+	ocppServer.StartOrphanedSessionDetection(dbService)
+	log.Println("Orphaned charging session detection started")
+
 	// Create and start API server with additional endpoints for database access
 	apiServer := server.NewAPIServerWithDB(ocppServer, ocppConfig, dbService)
 	if err := apiServer.Start(); err != nil {

@@ -120,6 +120,9 @@ func (s *APIServerWithDB) registerAPIEndpoints(mux *http.ServeMux) {
 
 	// Endpoint for raw message logs
 	mux.HandleFunc("/api/raw-logs", s.handleRawMessageLogs)
+
+	// Endpoint for force stop command
+	mux.HandleFunc("/api/commands/force-stop", s.handleForceStop)
 }
 
 // Start initiates the API server

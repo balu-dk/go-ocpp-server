@@ -42,12 +42,45 @@ func (s *APIServerWithDB) handleRemoteStart(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Create a pending remote start record before sending the command
+	connectorID := 0
+	if request.ConnectorID != nil {
+		connectorID = *request.ConnectorID
+	}
+
+	pendingStart := &database.PendingRemoteStart{
+		ChargePointID: request.ChargePointID,
+		ConnectorID:   connectorID,
+		IdTag:         request.IdTag,
+		RequestTime:   time.Now(),
+		Completed:     false,
+		Expired:       false,
+	}
+
+	if err := s.dbService.SavePendingRemoteStart(pendingStart); err != nil {
+		log.Printf("Warning: Failed to save pending remote start: %v", err)
+		// Continue anyway, don't fail the request
+	} else {
+		log.Printf("Created pending remote start record for %s connector %d, idTag %s",
+			request.ChargePointID, connectorID, request.IdTag)
+	}
+
 	// Send command
 	success, err := s.getCommandManager().RemoteStartTransaction(request.ChargePointID, request.IdTag, request.ConnectorID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to send command: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// Log the remote start attempt
+	s.dbService.AddLog(&database.Log{
+		ChargePointID: request.ChargePointID,
+		Timestamp:     time.Now(),
+		Level:         "INFO",
+		Source:        "API",
+		Message: fmt.Sprintf("Remote start requested for idTag %s on connector %v: %s",
+			request.IdTag, request.ConnectorID, successStr(success)),
+	})
 
 	// Return response
 	response := struct {
@@ -61,6 +94,8 @@ func (s *APIServerWithDB) handleRemoteStart(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
+
+// Add this function to server/api_commands.go
 
 // handleRemoteStop handles requests to stop a transaction remotely
 func (s *APIServerWithDB) handleRemoteStop(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +130,7 @@ func (s *APIServerWithDB) handleRemoteStop(w http.ResponseWriter, r *http.Reques
 	if request.TransactionID != nil && *request.TransactionID > 0 {
 		transactionID = *request.TransactionID
 	} else if request.ConnectorID != nil && *request.ConnectorID > 0 {
-		// If only  connector ID is available, try to find the transaction
+		// If only connector ID is available, try to find the transaction
 		tx, err := s.dbService.GetActiveTransactionForConnector(request.ChargePointID, *request.ConnectorID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("No active transaction found: %v", err), http.StatusNotFound)
@@ -122,7 +157,7 @@ func (s *APIServerWithDB) handleRemoteStop(w http.ResponseWriter, r *http.Reques
 			stopReason = fmt.Sprintf("Remote: %s", request.Reason)
 		}
 
-		// Mark stopReason as StopReason but don't stop transaction until we receieve StopTransaction from Charge Point
+		// Mark stopReason as StopReason but don't stop transaction until we receive StopTransaction from Charge Point
 		err := s.dbService.MarkTransactionStopReason(transactionID, stopReason)
 		if err != nil {
 			log.Printf("Warning: Failed to mark stop reason for transaction %d: %v", transactionID, err)
@@ -152,6 +187,167 @@ func (s *APIServerWithDB) handleRemoteStop(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleRemoteStop handles requests to stop a transaction remotely
+// handleForceStop forces a connector to stop charging even without a transaction
+func (s *APIServerWithDB) handleForceStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var request struct {
+		ChargePointID string `json:"chargePointId"`
+		ConnectorID   int    `json:"connectorId"`
+		Reason        string `json:"reason,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if request.ChargePointID == "" || request.ConnectorID <= 0 {
+		http.Error(w, "chargePointId and connectorId are required", http.StatusBadRequest)
+		return
+	}
+
+	// Set default reason if not provided
+	if request.Reason == "" {
+		request.Reason = "ForceStop"
+	} else {
+		request.Reason = "ForceStop: " + request.Reason
+	}
+
+	// Add logging
+	s.dbService.AddLog(&database.Log{
+		ChargePointID: request.ChargePointID,
+		Timestamp:     time.Now(),
+		Level:         "WARNING",
+		Source:        "API",
+		Message:       fmt.Sprintf("Force stop requested for connector %d with reason: %s", request.ConnectorID, request.Reason),
+	})
+
+	// Three-step process:
+	// 1. First try to find if there's actually a transaction that we missed
+	// 2. Try a remote stop with connector ID (some charge points support this)
+	// 3. If that fails, try unlocking the connector physically
+
+	// Step 1: Check if we can trigger the charge point to tell us about transactions
+	_, triggerErr := s.getCommandManager().TriggerMessage(request.ChargePointID, "StatusNotification", &request.ConnectorID)
+	if triggerErr != nil {
+		log.Printf("Warning: Could not trigger status notification: %v", triggerErr)
+	}
+
+	// Step 2: Try a "blind" remote stop using RemoteStopTransaction with dummy transaction ID
+	// Some charge points will stop charging the connector even with an invalid transaction ID
+	dummyTxID := time.Now().Unix() % 1000000
+	payload := map[string]interface{}{
+		"transactionId": dummyTxID,
+	}
+
+	remoteStopResult, remoteStopErr := s.getCommandManager().SendGenericCommand(
+		request.ChargePointID, "RemoteStopTransaction", payload)
+
+	var remoteStopSuccess bool
+	if remoteStopErr == nil {
+		remoteStopSuccess = successFromRemoteStopResult(remoteStopResult)
+	}
+
+	// Record the attempt
+	if remoteStopErr != nil {
+		s.dbService.AddLog(&database.Log{
+			ChargePointID: request.ChargePointID,
+			Timestamp:     time.Now(),
+			Level:         "WARNING",
+			Source:        "System",
+			Message:       fmt.Sprintf("Remote stop attempt with dummy ID failed: %v", remoteStopErr),
+		})
+	}
+
+	// Step 3: Try to unlock the connector physically
+	unlockSuccess, unlockErr := s.getCommandManager().UnlockConnector(
+		request.ChargePointID, request.ConnectorID)
+
+	if unlockErr != nil {
+		s.dbService.AddLog(&database.Log{
+			ChargePointID: request.ChargePointID,
+			Timestamp:     time.Now(),
+			Level:         "WARNING",
+			Source:        "System",
+			Message:       fmt.Sprintf("Unlock connector attempt failed: %v", unlockErr),
+		})
+	}
+
+	// Step 4: As a last resort, try resetting the charge point (soft reset)
+	var resetSuccess bool
+	var resetErr error
+
+	// Only do a reset if the previous methods failed
+	if (remoteStopErr != nil || !remoteStopSuccess) &&
+		(unlockErr != nil || !unlockSuccess) {
+		resetSuccess, resetErr = s.getCommandManager().Reset(request.ChargePointID, "Soft")
+
+		if resetErr != nil {
+			s.dbService.AddLog(&database.Log{
+				ChargePointID: request.ChargePointID,
+				Timestamp:     time.Now(),
+				Level:         "WARNING",
+				Source:        "System",
+				Message:       fmt.Sprintf("Soft reset attempt failed: %v", resetErr),
+			})
+		}
+	}
+
+	// Create the response
+	response := struct {
+		Success           bool        `json:"success"`
+		Message           string      `json:"message"`
+		RemoteStopResult  interface{} `json:"remoteStopResult,omitempty"`
+		UnlockSuccess     bool        `json:"unlockSuccess"`
+		ResetSuccess      bool        `json:"resetSuccess,omitempty"`
+		RecommendedAction string      `json:"recommendedAction,omitempty"`
+	}{
+		Success:       unlockSuccess || (resetErr == nil && resetSuccess) || remoteStopSuccess,
+		Message:       fmt.Sprintf("Force stop attempts completed for %s connector %d", request.ChargePointID, request.ConnectorID),
+		UnlockSuccess: unlockSuccess,
+	}
+
+	// Add reset result if performed
+	if resetErr == nil {
+		response.ResetSuccess = resetSuccess
+	}
+
+	// Add remote stop result if available
+	if remoteStopErr == nil {
+		response.RemoteStopResult = remoteStopResult
+	}
+
+	// Add recommended action if all attempts failed
+	if !response.Success {
+		response.RecommendedAction = "Manual intervention required. Try power cycling the charge point."
+	}
+
+	// Return response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// Helper function to check success from generic command result
+func successFromRemoteStopResult(result interface{}) bool {
+	if result == nil {
+		return false
+	}
+
+	// Try to extract status from result
+	if resultMap, ok := result.(map[string]interface{}); ok {
+		if status, ok := resultMap["status"].(string); ok {
+			return status == "Accepted"
+		}
+	}
+	return false
 }
 
 // handleReset handles requests to reset a charge point

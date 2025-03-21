@@ -90,3 +90,15 @@ type RawMessageLog struct {
 	MessageID     string    `json:"messageId,omitempty"`      // Unique ID of the message
 	Message       string    `gorm:"type:text" json:"message"` // Full message content as JSON
 }
+
+// PendingRemoteStart tracks remote start requests that haven't been confirmed with a StartTransaction
+type PendingRemoteStart struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	ChargePointID string    `json:"chargePointId"`
+	ConnectorID   int       `json:"connectorId"`
+	IdTag         string    `json:"idTag"`
+	RequestTime   time.Time `json:"requestTime"`
+	Completed     bool      `json:"completed"`
+	TransactionID *int      `json:"transactionId,omitempty"` // Once a transaction is created
+	Expired       bool      `json:"expired"`                 // Set to true after expiration time
+}
