@@ -107,6 +107,7 @@ func main() {
 	fmt.Printf("  GET  %s/logs                           - View system logs\n", apiURL)
 	fmt.Printf("  POST %s/commands/remote-start          - Start charging remotely\n", apiURL)
 	fmt.Printf("  POST %s/commands/remote-stop           - Stop charging remotely\n", apiURL)
+	fmt.Printf("  POST %s/api/commands/force-stop        - Force stop charging remotely\n", apiURL)
 	fmt.Printf("  POST %s/commands/reset                 - Reset a charge point\n", apiURL)
 	fmt.Printf("  POST %s/commands/unlock-connector      - Unlock a connector\n", apiURL)
 	fmt.Printf("  GET  %s/commands/get-configuration     - Get charge point configuration\n", apiURL)
