@@ -520,8 +520,10 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 	connectorId := int(connectorIdFloat)
 	errorCode, _ := payload["errorCode"].(string)
 
-	fmt.Printf("StatusNotification fra %s: ConnectorId=%v, Status=%s, ErrorCode=%s\n",
+	fmt.Printf("StatusNotification from %s: ConnectorId=%v, Status=%s, ErrorCode=%s\n",
 		chargePointID, connectorId, status, errorCode)
+
+	statusUpdated := false
 
 	// Update connector status in database
 	if connectorId == 0 {
@@ -533,6 +535,8 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 			if err := cs.dbService.SaveChargePoint(cp); err != nil {
 				log.Printf("Error updating charge point status: %v", err)
 				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error updating charge point status: %v", err))
+			} else {
+				statusUpdated = true
 			}
 		} else {
 			log.Printf("Charge point not found for status update: %s", chargePointID)
@@ -558,8 +562,14 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 		}
 
 		if err := cs.dbService.SaveConnector(connector); err != nil {
-			log.Printf("Fejl ved gemning af connector status: %v", err)
-			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Fejl ved gemning af connector status: %v", err))
+			log.Printf("Error saving connector status: %v", err)
+			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error saving connector status: %v", err))
+		} else {
+			// Now update the overall charge point status based on connector statuses
+			// Only do this if we didn't already update the status via connector 0
+			if !statusUpdated {
+				cs.updateChargePointStatusFromConnectors(chargePointID)
+			}
 		}
 	}
 
@@ -628,7 +638,7 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 						}
 					}
 
-					// Convert til Wh if necessary
+					// Convert to Wh if necessary
 					if latestEnergyValue > 0 {
 						// Convert kWh to Wh if unit is kWh
 						if meterValues[0].Unit == "kWh" {
@@ -655,6 +665,67 @@ func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(char
 
 	// StatusNotification requires an empty response according to the OCPP specification
 	return map[string]interface{}{}
+}
+
+// Add this new helper method to CentralSystemHandlerWithDB
+func (cs *CentralSystemHandlerWithDB) updateChargePointStatusFromConnectors(chargePointID string) {
+	// Get all connectors for this charge point
+	connectors, err := cs.dbService.ListConnectors(chargePointID)
+	if err != nil || len(connectors) == 0 {
+		return
+	}
+
+	// Get the charge point
+	cp, err := cs.dbService.GetChargePoint(chargePointID)
+	if err != nil {
+		return
+	}
+
+	// Determine overall status based on connector statuses
+	// Priority: Charging > Preparing > Finishing > Reserved > Unavailable > Faulted > Available
+	overallStatus := "Available" // Default if nothing else applies
+
+	for _, connector := range connectors {
+		switch connector.Status {
+		case "Charging":
+			overallStatus = "Charging"
+			goto updateStatus // Highest priority, exit the loop
+		case "Preparing":
+			if overallStatus != "Charging" {
+				overallStatus = "Preparing"
+			}
+		case "Finishing":
+			if overallStatus != "Charging" && overallStatus != "Preparing" {
+				overallStatus = "Finishing"
+			}
+		case "Reserved":
+			if overallStatus == "Available" {
+				overallStatus = "Reserved"
+			}
+		case "Unavailable":
+			if overallStatus == "Available" || overallStatus == "Reserved" {
+				overallStatus = "Unavailable"
+			}
+		case "Faulted":
+			if overallStatus == "Available" {
+				overallStatus = "Faulted"
+			}
+		}
+	}
+
+updateStatus:
+	// Update charge point status if it has changed or is still "Unknown"
+	if cp.Status != overallStatus || cp.Status == "Unknown" {
+		cp.Status = overallStatus
+		cp.UpdatedAt = time.Now()
+		if err := cs.dbService.SaveChargePoint(cp); err != nil {
+			cs.logEvent(chargePointID, "ERROR", "System",
+				fmt.Sprintf("Error updating overall charge point status: %v", err))
+		} else {
+			cs.logEvent(chargePointID, "INFO", "System",
+				fmt.Sprintf("Updated overall charge point status to %s based on connector statuses", overallStatus))
+		}
+	}
 }
 
 // handleStartTransactionRequestWithDB handles a StartTransaction request with database integration

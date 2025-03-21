@@ -490,3 +490,58 @@ func (s *Service) ListConnectedChargePoints() ([]ChargePoint, error) {
 	}
 	return chargePoints, nil
 }
+
+func (s *Service) UpdateChargePointStatusFromConnectors(chargePointID string) error {
+	// Get all connectors for this charge point
+	connectors, err := s.ListConnectors(chargePointID)
+	if err != nil || len(connectors) == 0 {
+		return err
+	}
+
+	// Get the charge point
+	cp, err := s.GetChargePoint(chargePointID)
+	if err != nil {
+		return err
+	}
+
+	// Determine overall status based on connector statuses
+	// Priority: Charging > Preparing > Finishing > Reserved > Unavailable > Faulted > Available
+	overallStatus := "Available" // Default
+
+	for _, connector := range connectors {
+		switch connector.Status {
+		case "Charging":
+			overallStatus = "Charging"
+			break // Highest priority, exit the loop
+		case "Preparing":
+			if overallStatus != "Charging" {
+				overallStatus = "Preparing"
+			}
+		case "Finishing":
+			if overallStatus != "Charging" && overallStatus != "Preparing" {
+				overallStatus = "Finishing"
+			}
+		case "Reserved":
+			if overallStatus == "Available" {
+				overallStatus = "Reserved"
+			}
+		case "Unavailable":
+			if overallStatus == "Available" || overallStatus == "Reserved" {
+				overallStatus = "Unavailable"
+			}
+		case "Faulted":
+			if overallStatus == "Available" {
+				overallStatus = "Faulted"
+			}
+		}
+	}
+
+	// Update charge point status if it has changed
+	if cp.Status != overallStatus {
+		cp.Status = overallStatus
+		cp.UpdatedAt = time.Now()
+		return s.SaveChargePoint(cp)
+	}
+
+	return nil
+}

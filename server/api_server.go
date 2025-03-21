@@ -197,15 +197,11 @@ func (s *APIServerWithDB) handleServerStatus(w http.ResponseWriter, r *http.Requ
 		ServerTime            time.Time `json:"serverTime"`
 		ChargePointsTotal     int       `json:"chargePointsTotal"`
 		ChargePointsConnected int       `json:"chargePointsConnected"`
-		DatabaseType          string    `json:"databaseType"`
-		Uptime                string    `json:"uptime"`
 	}{
 		Status:                "running",
 		ServerTime:            time.Now(),
 		ChargePointsTotal:     len(chargePoints),
 		ChargePointsConnected: connectedCount,
-		DatabaseType:          string(s.dbService.GetDatabaseType()),
-		Uptime:                "N/A", // Would need to track start time
 	}
 
 	w.Header().Set("Content-Type", "application/json")
