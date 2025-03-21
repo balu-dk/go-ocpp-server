@@ -27,6 +27,7 @@ type Connector struct {
 	ConnectorID   int       `json:"connectorId"` // The connector ID as reported by the charge point
 	Status        string    `json:"status"`      // Available, Occupied, Reserved, Unavailable, Faulted
 	ErrorCode     string    `json:"errorCode,omitempty"`
+	CurrentPower  float64   `json:"currentPower,omitempty"`
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 

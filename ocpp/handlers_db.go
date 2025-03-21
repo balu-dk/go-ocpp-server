@@ -933,6 +933,9 @@ func (cs *CentralSystemHandlerWithDB) handleMeterValuesRequestWithDB(chargePoint
 
 	// Process meter values if available
 	meterValuesCount := 0
+	var currentPower float64 = 0.0
+	var powerUpdated bool = false
+
 	if meterValues, ok := payload["meterValue"].([]interface{}); ok && len(meterValues) > 0 {
 		for _, meterValueInterface := range meterValues {
 			if meterValue, ok := meterValueInterface.(map[string]interface{}); ok {
@@ -976,6 +979,12 @@ func (cs *CentralSystemHandlerWithDB) handleMeterValuesRequestWithDB(chargePoint
 								measurand = "Energy.Active.Import.Register" // Default measurand according to OCPP
 							}
 
+							// Check if this is power data
+							if measurand == "Power.Active.Import" {
+								currentPower = value
+								powerUpdated = true
+							}
+
 							// Save meter value to database
 							meterValueRecord := &database.MeterValue{
 								TransactionID: transactionId,
@@ -1004,6 +1013,19 @@ func (cs *CentralSystemHandlerWithDB) handleMeterValuesRequestWithDB(chargePoint
 		cs.logEvent(chargePointID, "INFO", "ChargePoint",
 			fmt.Sprintf("Processed %d meter values for transaction %d, connector %d",
 				meterValuesCount, transactionId, connectorId))
+	}
+
+	// Update connector with current power if we received power data
+	if powerUpdated {
+		connector, err := cs.dbService.GetConnector(chargePointID, connectorId)
+		if err == nil {
+			connector.CurrentPower = currentPower
+			if err := cs.dbService.SaveConnector(connector); err != nil {
+				log.Printf("Error updating connector with current power: %v", err)
+			} else {
+				log.Printf("Updated connector %d current power to %.2f watts", connectorId, currentPower)
+			}
+		}
 	}
 
 	// MeterValues requires an empty response according to the OCPP spec
