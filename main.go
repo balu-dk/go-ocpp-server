@@ -40,6 +40,10 @@ func main() {
 	// Initialize the proxy manager with database service
 	proxyManager := ocppserver.NewProxyManager(dbService)
 
+	centralHandler := ocppserver.NewCentralSystemHandlerWithDB(dbService, proxyManager)
+
+	proxyManager.SetCentralHandler(centralHandler)
+
 	// Create and register the ID transformer for handling ID transformations in proxied messages
 	idTransformer := ocppserver.NewIDTransformer(dbService, proxyManager)
 	proxyManager.RegisterMessageProcessor(idTransformer)

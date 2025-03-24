@@ -20,6 +20,7 @@ type ProxyManager struct {
 	reverseIDMapping  map[string]string                   // Maps transformed ID -> original ID
 	mutex             sync.RWMutex
 	messageProcessors []MessageProcessor
+	centralHandler    *CentralSystemHandlerWithDB
 }
 
 // MessageProcessor defines functions that can process messages before forwarding
@@ -202,9 +203,16 @@ func (pm *ProxyManager) handleProxyMessages(chargePointID string, destinationID 
 			continue
 		}
 
-		// TODO: Forward the message to the actual charge point
-		// This will need to be implemented in the OCPP handler
-		// by exposing a method to send a raw message to a charge point
+		// Forward the message to the charge point if we have a central handler
+		if pm.centralHandler != nil {
+			if err := pm.centralHandler.ForwardMessageToChargePoint(chargePointID, modifiedMessage); err != nil {
+				log.Printf("Error forwarding message to charge point %s: %v", chargePointID, err)
+			} else {
+				log.Printf("Successfully forwarded message from proxy to charge point %s", chargePointID)
+			}
+		} else {
+			log.Printf("Cannot forward message - no central handler available")
+		}
 	}
 }
 

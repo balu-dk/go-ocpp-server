@@ -1127,3 +1127,52 @@ func (cs *CentralSystemHandlerWithDB) handleUnexpectedChargingStatus(chargePoint
 func (cs *CentralSystemHandlerWithDB) GetProxyManager() *ProxyManager {
 	return cs.proxyManager
 }
+
+// SendMessageToChargePoint sends a raw message to a specific charge point
+func (cs *CentralSystemHandlerWithDB) SendMessageToChargePoint(chargePointID string, message []byte) error {
+	cs.mutex.Lock()
+	conn, exists := cs.clients[chargePointID]
+	cs.mutex.Unlock()
+
+	if !exists || conn == nil {
+		return fmt.Errorf("charge point %s is not connected", chargePointID)
+	}
+
+	// Send the raw message
+	if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+		return fmt.Errorf("failed to send message to charge point: %v", err)
+	}
+
+	// Log that we forwarded a message
+	cs.logEvent(chargePointID, "INFO", "Proxy",
+		fmt.Sprintf("Forwarded message from proxy to charge point: %s", string(message)))
+
+	return nil
+}
+
+func (pm *ProxyManager) SetCentralHandler(handler *CentralSystemHandlerWithDB) {
+	pm.centralHandler = handler
+}
+
+// ForwardMessageToChargePoint sends a message directly to a charge point
+func (cs *CentralSystemHandlerWithDB) ForwardMessageToChargePoint(chargePointID string, message []byte) error {
+	// Get the connection for this charge point
+	cs.mutex.Lock()
+	conn, exists := cs.clients[chargePointID]
+	cs.mutex.Unlock()
+
+	if !exists || conn == nil {
+		return fmt.Errorf("charge point %s not connected", chargePointID)
+	}
+
+	// Forward the message
+	if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+		return fmt.Errorf("failed to send message to charge point: %v", err)
+	}
+
+	// Log the event
+	cs.logEvent(chargePointID, "INFO", "Proxy",
+		fmt.Sprintf("Forwarded message from proxy to charge point"))
+
+	return nil
+}
