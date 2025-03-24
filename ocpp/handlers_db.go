@@ -24,11 +24,12 @@ type CentralSystemHandlerWithDB struct {
 	commandManager *CommandManager
 	cmdMgrInit     sync.Once
 	dbLogger       *DatabaseMessageLogger
-	mutex          sync.Mutex // Add this field
+	mutex          sync.Mutex
+	proxyManager   *ProxyManager
 }
 
 // NewCentralSystemHandlerWithDB creates a new handler with database integration
-func NewCentralSystemHandlerWithDB(dbService *database.Service) *CentralSystemHandlerWithDB {
+func NewCentralSystemHandlerWithDB(dbService *database.Service, proxyManager *ProxyManager) *CentralSystemHandlerWithDB {
 	// Create a database message logger
 	dbLogger := NewDatabaseMessageLogger(dbService)
 
@@ -40,9 +41,10 @@ func NewCentralSystemHandlerWithDB(dbService *database.Service) *CentralSystemHa
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 		},
-		clients:   make(map[string]*websocket.Conn),
-		dbService: dbService,
-		dbLogger:  dbLogger, // Use the database logger
+		clients:      make(map[string]*websocket.Conn),
+		dbService:    dbService,
+		dbLogger:     dbLogger, // Use the database logger
+		proxyManager: proxyManager,
 	}
 }
 

@@ -103,3 +103,48 @@ type PendingRemoteStart struct {
 	TransactionID *int      `json:"transactionId,omitempty"` // Once a transaction is created
 	Expired       bool      `json:"expired"`                 // Set to true after expiration time
 }
+
+// ProxyDestination represents a central system to proxy requests to
+type ProxyDestination struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Name        string    `json:"name"`                  // Friendly name for this proxy destination
+	URL         string    `json:"url"`                   // WebSocket URL of the central system
+	Description string    `json:"description,omitempty"` // Optional description
+	IsActive    bool      `json:"isActive"`              // Whether this proxy destination is active
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// ChargePointProxy stores the proxy configuration for a specific charge point
+type ChargePointProxy struct {
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	ChargePointID     string    `json:"chargePointId"`     // ID of the charge point
+	ProxyEnabled      bool      `json:"proxyEnabled"`      // Whether proxying is enabled for this charge point
+	IDTransformPrefix string    `json:"idTransformPrefix"` // Prefix to add to the ID when proxying
+	IDTransformSuffix string    `json:"idTransformSuffix"` // Suffix to add to the ID when proxying
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+// ChargePointProxyMapping maps a charge point to multiple proxy destinations
+type ChargePointProxyMapping struct {
+	ID                 uint      `gorm:"primaryKey" json:"id"`
+	ChargePointID      string    `json:"chargePointId"`      // ID of the charge point
+	ProxyDestinationID uint      `json:"proxyDestinationId"` // ID of the proxy destination
+	IsActive           bool      `json:"isActive"`           // Whether this specific mapping is active
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+// ProxyMessageLog stores logs of proxied messages
+type ProxyMessageLog struct {
+	ID                 uint      `gorm:"primaryKey" json:"id"`
+	ChargePointID      string    `json:"chargePointId"`
+	ProxyDestinationID uint      `json:"proxyDestinationId"`
+	Timestamp          time.Time `json:"timestamp"`
+	Direction          string    `json:"direction"` // "TO_PROXY" or "FROM_PROXY"
+	OriginalMessage    string    `gorm:"type:text" json:"originalMessage"`
+	TransformedMessage string    `gorm:"type:text" json:"transformedMessage,omitempty"`
+	WasModified        bool      `json:"wasModified"`
+	WasBlocked         bool      `json:"wasBlocked"`
+}

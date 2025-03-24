@@ -123,6 +123,11 @@ func (s *APIServerWithDB) registerAPIEndpoints(mux *http.ServeMux) {
 
 	// Endpoint for force stop command
 	mux.HandleFunc("/api/commands/force-stop", s.handleForceStop)
+
+	mux.HandleFunc("/api/proxy/destinations", s.handleProxyDestinations)
+	mux.HandleFunc("/api/proxy/charge-points", s.handleChargePointProxies)
+	mux.HandleFunc("/api/proxy/mappings", s.handleProxyMappings)
+	mux.HandleFunc("/api/proxy/logs", s.handleProxyLogs)
 }
 
 // Start initiates the API server
@@ -730,6 +735,267 @@ func (s *APIServerWithDB) handleRawMessageLogs(w http.ResponseWriter, r *http.Re
 	response := struct {
 		Count int                      `json:"count"`
 		Logs  []database.RawMessageLog `json:"logs"`
+	}{
+		Count: len(logs),
+		Logs:  logs,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleProxyDestinations handles CRUD operations for proxy destinations
+func (s *APIServerWithDB) handleProxyDestinations(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// List proxy destinations
+		destinations, err := s.dbService.ListProxyDestinations()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error fetching proxy destinations: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(destinations)
+
+	case http.MethodPost:
+		// Create or update proxy destination
+		var destination database.ProxyDestination
+		if err := json.NewDecoder(r.Body).Decode(&destination); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Set timestamps
+		now := time.Now()
+		if destination.CreatedAt.IsZero() {
+			destination.CreatedAt = now
+		}
+		destination.UpdatedAt = now
+
+		if err := s.dbService.SaveProxyDestination(&destination); err != nil {
+			http.Error(w, fmt.Sprintf("Error saving proxy destination: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(destination)
+
+	case http.MethodDelete:
+		// Delete proxy destination
+		idStr := r.URL.Query().Get("id")
+		if idStr == "" {
+			http.Error(w, "id query parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		id, err := strconv.ParseUint(idStr, 10, 32)
+		if err != nil {
+			http.Error(w, "Invalid id parameter", http.StatusBadRequest)
+			return
+		}
+
+		if err := s.dbService.DeleteProxyDestination(uint(id)); err != nil {
+			http.Error(w, fmt.Sprintf("Error deleting proxy destination: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleChargePointProxies handles proxy configuration for charge points
+func (s *APIServerWithDB) handleChargePointProxies(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Get proxy config for a charge point
+		chargePointID := r.URL.Query().Get("chargePointId")
+		if chargePointID == "" {
+			http.Error(w, "chargePointId query parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		proxyConfig, err := s.dbService.GetChargePointProxy(chargePointID)
+		if err != nil {
+			// If not found, return an empty config
+			proxyConfig = &database.ChargePointProxy{
+				ChargePointID: chargePointID,
+				ProxyEnabled:  false,
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(proxyConfig)
+
+	case http.MethodPost:
+		// Create or update proxy config for a charge point
+		var proxyConfig database.ChargePointProxy
+		if err := json.NewDecoder(r.Body).Decode(&proxyConfig); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		if proxyConfig.ChargePointID == "" {
+			http.Error(w, "chargePointId is required", http.StatusBadRequest)
+			return
+		}
+
+		// Set timestamps
+		now := time.Now()
+		if proxyConfig.CreatedAt.IsZero() {
+			proxyConfig.CreatedAt = now
+		}
+		proxyConfig.UpdatedAt = now
+
+		if err := s.dbService.SaveChargePointProxy(&proxyConfig); err != nil {
+			http.Error(w, fmt.Sprintf("Error saving proxy config: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(proxyConfig)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleProxyMappings handles mappings between charge points and proxy destinations
+func (s *APIServerWithDB) handleProxyMappings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Get proxy mappings for a charge point
+		chargePointID := r.URL.Query().Get("chargePointId")
+		if chargePointID == "" {
+			http.Error(w, "chargePointId query parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		mappings, err := s.dbService.GetChargePointProxyMappings(chargePointID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error fetching proxy mappings: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(mappings)
+
+	case http.MethodPost:
+		// Create or update a proxy mapping
+		var mapping database.ChargePointProxyMapping
+		if err := json.NewDecoder(r.Body).Decode(&mapping); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		if mapping.ChargePointID == "" || mapping.ProxyDestinationID == 0 {
+			http.Error(w, "chargePointId and proxyDestinationId are required", http.StatusBadRequest)
+			return
+		}
+
+		// Set timestamps
+		now := time.Now()
+		if mapping.CreatedAt.IsZero() {
+			mapping.CreatedAt = now
+		}
+		mapping.UpdatedAt = now
+
+		if err := s.dbService.SaveChargePointProxyMapping(&mapping); err != nil {
+			http.Error(w, fmt.Sprintf("Error saving proxy mapping: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(mapping)
+
+	case http.MethodDelete:
+		// Delete a proxy mapping
+		idStr := r.URL.Query().Get("id")
+		if idStr == "" {
+			http.Error(w, "id query parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		id, err := strconv.ParseUint(idStr, 10, 32)
+		if err != nil {
+			http.Error(w, "Invalid id parameter", http.StatusBadRequest)
+			return
+		}
+
+		// Delete the mapping
+		result := s.dbService.GetDB().Delete(&database.ChargePointProxyMapping{}, id)
+		if result.Error != nil {
+			http.Error(w, fmt.Sprintf("Error deleting proxy mapping: %v", result.Error), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleProxyLogs handles retrieving proxy message logs
+func (s *APIServerWithDB) handleProxyLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse query parameters
+	chargePointID := r.URL.Query().Get("chargePointId")
+	direction := r.URL.Query().Get("direction")
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+
+	// Default limit and offset
+	limit := 50
+	if limitStr != "" {
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	offset := 0
+	if offsetStr != "" {
+		parsedOffset, err := strconv.Atoi(offsetStr)
+		if err == nil && parsedOffset >= 0 {
+			offset = parsedOffset
+		}
+	}
+
+	// Query the database
+	db := s.dbService.GetDB()
+	var logs []database.ProxyMessageLog
+
+	query := db.Order("timestamp desc").Limit(limit).Offset(offset)
+
+	if chargePointID != "" {
+		query = query.Where("charge_point_id = ?", chargePointID)
+	}
+
+	if direction != "" {
+		query = query.Where("direction = ?", direction)
+	}
+
+	result := query.Find(&logs)
+	if result.Error != nil {
+		http.Error(w, fmt.Sprintf("Error fetching proxy logs: %v", result.Error), http.StatusInternalServerError)
+		return
+	}
+
+	// Response with count for pagination
+	response := struct {
+		Count int                        `json:"count"`
+		Logs  []database.ProxyMessageLog `json:"logs"`
 	}{
 		Count: len(logs),
 		Logs:  logs,

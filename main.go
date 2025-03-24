@@ -37,9 +37,16 @@ func main() {
 	log.Printf("OCPP server configured with host: %s, WebSocket port: %d, API port: %d",
 		ocppConfig.Host, ocppConfig.WebSocketPort, ocppConfig.APIPort)
 
-	// Create central system handler with database integration
-	var handler = ocppserver.NewCentralSystemHandlerWithDB(dbService)
-	log.Println("OCPP handler created with database integration")
+	// Initialize the proxy manager with database service
+	proxyManager := ocppserver.NewProxyManager(dbService)
+
+	// Create and register the ID transformer for handling ID transformations in proxied messages
+	idTransformer := ocppserver.NewIDTransformer(dbService, proxyManager)
+	proxyManager.RegisterMessageProcessor(idTransformer)
+
+	// Create central system handler with database integration and proxy manager
+	var handler = ocppserver.NewCentralSystemHandlerWithDB(dbService, proxyManager)
+	log.Println("OCPP handler created with database integration and proxy support")
 
 	// Create and initialize OCPP server
 	ocppServer := ocppserver.NewOCPPServer(ocppConfig, handler)
@@ -118,21 +125,36 @@ func main() {
 	fmt.Printf("  POST %s/admin/close-transaction        - Administratively close a transaction\n", apiURL)
 	fmt.Printf("  GET  %s/reports/energy                 - Generate energy consumption report\n", apiURL)
 
+	// New proxy-related endpoints
+	fmt.Println("\nProxy System API endpoints:")
+	fmt.Printf("  GET/POST/DELETE %s/proxy/destinations  - Manage proxy destinations\n", apiURL)
+	fmt.Printf("  GET/POST        %s/proxy/charge-points - Configure proxy settings for charge points\n", apiURL)
+	fmt.Printf("  GET/POST/DELETE %s/proxy/mappings      - Manage charge point to proxy mappings\n", apiURL)
+	fmt.Printf("  GET             %s/proxy/logs          - View proxy message logs\n", apiURL)
+
 	// Setup graceful shutdown
-	setupGracefulShutdown(apiServer)
+	setupGracefulShutdown(apiServer, proxyManager)
 
 	// Keep server running until terminated
 	apiServer.RunForever()
 }
 
 // setupGracefulShutdown configures graceful shutdown on system signals
-func setupGracefulShutdown(apiServer *server.APIServerWithDB) {
+func setupGracefulShutdown(apiServer *server.APIServerWithDB, proxyManager *ocppserver.ProxyManager) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-c
 		fmt.Println("\nShutting down OCPP server...")
+
+		// Disconnect all proxy connections
+		if proxyManager != nil {
+			log.Println("Disconnecting proxy connections...")
+			proxyManager.DisconnectAllProxies()
+		}
+
+		// Shutdown API server
 		apiServer.Shutdown()
 		os.Exit(0)
 	}()
