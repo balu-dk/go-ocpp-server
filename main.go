@@ -50,6 +50,7 @@ func main() {
 
 	// Create central system handler with database integration and proxy manager
 	var handler = ocppserver.NewCentralSystemHandlerWithDB(dbService, proxyManager)
+	proxyManager.StartProxyHealthCheck()
 	log.Println("OCPP handler created with database integration and proxy support")
 
 	// Create and initialize OCPP server

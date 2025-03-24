@@ -534,3 +534,28 @@ func (pm *ProxyManager) ManuallyConnectToProxies(chargePointID string) error {
 	// Then connect to all configured proxies
 	return pm.ConnectToProxies(chargePointID)
 }
+
+func (pm *ProxyManager) StartProxyHealthCheck() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			pm.mutex.RLock()
+			chargePoints := make(map[string]bool)
+			for _, connections := range pm.proxyConnections {
+				for cpID := range connections {
+					chargePoints[cpID] = true
+				}
+			}
+			pm.mutex.RUnlock()
+
+			// Reconnect all charge points that have proxy connections
+			for cpID := range chargePoints {
+				if err := pm.ConnectToProxies(cpID); err != nil {
+					log.Printf("Health check: Failed to reconnect %s to proxies: %v", cpID, err)
+				}
+			}
+		}
+	}()
+}
