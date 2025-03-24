@@ -748,7 +748,27 @@ func (s *APIServerWithDB) handleRawMessageLogs(w http.ResponseWriter, r *http.Re
 func (s *APIServerWithDB) handleProxyDestinations(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// List proxy destinations
+		// Get a specific destination if ID is provided
+		idStr := r.URL.Query().Get("id")
+		if idStr != "" {
+			id, err := strconv.ParseUint(idStr, 10, 32)
+			if err != nil {
+				http.Error(w, "Invalid id parameter", http.StatusBadRequest)
+				return
+			}
+
+			destination, err := s.dbService.GetProxyDestination(uint(id))
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Proxy destination not found: %v", err), http.StatusNotFound)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(destination)
+			return
+		}
+
+		// List all destinations
 		destinations, err := s.dbService.ListProxyDestinations()
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error fetching proxy destinations: %v", err), http.StatusInternalServerError)
@@ -766,12 +786,26 @@ func (s *APIServerWithDB) handleProxyDestinations(w http.ResponseWriter, r *http
 			return
 		}
 
-		// Set timestamps
-		now := time.Now()
-		if destination.CreatedAt.IsZero() {
-			destination.CreatedAt = now
+		// Check if this is an update (ID is provided) or a new destination
+		isUpdate := destination.ID > 0
+
+		// For updates, verify the destination exists
+		if isUpdate {
+			existing, err := s.dbService.GetProxyDestination(destination.ID)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Proxy destination not found: %v", err), http.StatusNotFound)
+				return
+			}
+
+			// Preserve creation timestamp for updates
+			destination.CreatedAt = existing.CreatedAt
+		} else {
+			// Set created time for new destinations
+			destination.CreatedAt = time.Now()
 		}
-		destination.UpdatedAt = now
+
+		// Always update timestamp
+		destination.UpdatedAt = time.Now()
 
 		if err := s.dbService.SaveProxyDestination(&destination); err != nil {
 			http.Error(w, fmt.Sprintf("Error saving proxy destination: %v", err), http.StatusInternalServerError)
@@ -779,7 +813,9 @@ func (s *APIServerWithDB) handleProxyDestinations(w http.ResponseWriter, r *http
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		if !isUpdate {
+			w.WriteHeader(http.StatusCreated)
+		}
 		json.NewEncoder(w).Encode(destination)
 
 	case http.MethodDelete:
@@ -812,13 +848,23 @@ func (s *APIServerWithDB) handleProxyDestinations(w http.ResponseWriter, r *http
 func (s *APIServerWithDB) handleChargePointProxies(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// Get proxy config for a charge point
+		// Get proxy config for a specific charge point
 		chargePointID := r.URL.Query().Get("chargePointId")
 		if chargePointID == "" {
-			http.Error(w, "chargePointId query parameter is required", http.StatusBadRequest)
+			// If no specific charge point ID is provided, list all configs
+			var proxyConfigs []database.ChargePointProxy
+			result := s.dbService.GetDB().Find(&proxyConfigs)
+			if result.Error != nil {
+				http.Error(w, fmt.Sprintf("Error fetching proxy configs: %v", result.Error), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(proxyConfigs)
 			return
 		}
 
+		// Get specific charge point config
 		proxyConfig, err := s.dbService.GetChargePointProxy(chargePointID)
 		if err != nil {
 			// If not found, return an empty config
@@ -844,12 +890,36 @@ func (s *APIServerWithDB) handleChargePointProxies(w http.ResponseWriter, r *htt
 			return
 		}
 
-		// Set timestamps
-		now := time.Now()
-		if proxyConfig.CreatedAt.IsZero() {
-			proxyConfig.CreatedAt = now
+		// Check if this is an update or a new config
+		isUpdate := proxyConfig.ID > 0
+
+		// For updates, check if the config exists
+		if isUpdate {
+			var existing database.ChargePointProxy
+			result := s.dbService.GetDB().First(&existing, proxyConfig.ID)
+			if result.Error != nil {
+				http.Error(w, fmt.Sprintf("Proxy config not found: %v", result.Error), http.StatusNotFound)
+				return
+			}
+
+			// Preserve creation timestamp
+			proxyConfig.CreatedAt = existing.CreatedAt
+		} else {
+			// Check if a config already exists for this charge point
+			existing, err := s.dbService.GetChargePointProxy(proxyConfig.ChargePointID)
+			if err == nil {
+				// Config exists, use its ID for an update
+				proxyConfig.ID = existing.ID
+				proxyConfig.CreatedAt = existing.CreatedAt
+				isUpdate = true
+			} else {
+				// New config
+				proxyConfig.CreatedAt = time.Now()
+			}
 		}
-		proxyConfig.UpdatedAt = now
+
+		// Always update timestamp
+		proxyConfig.UpdatedAt = time.Now()
 
 		if err := s.dbService.SaveChargePointProxy(&proxyConfig); err != nil {
 			http.Error(w, fmt.Sprintf("Error saving proxy config: %v", err), http.StatusInternalServerError)
@@ -857,7 +927,9 @@ func (s *APIServerWithDB) handleChargePointProxies(w http.ResponseWriter, r *htt
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		if !isUpdate {
+			w.WriteHeader(http.StatusCreated)
+		}
 		json.NewEncoder(w).Encode(proxyConfig)
 
 	default:
@@ -869,13 +941,23 @@ func (s *APIServerWithDB) handleChargePointProxies(w http.ResponseWriter, r *htt
 func (s *APIServerWithDB) handleProxyMappings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// Get proxy mappings for a charge point
+		// Get mappings for a specific charge point
 		chargePointID := r.URL.Query().Get("chargePointId")
 		if chargePointID == "" {
-			http.Error(w, "chargePointId query parameter is required", http.StatusBadRequest)
+			// List all mappings if no charge point ID is provided
+			var mappings []database.ChargePointProxyMapping
+			result := s.dbService.GetDB().Find(&mappings)
+			if result.Error != nil {
+				http.Error(w, fmt.Sprintf("Error fetching proxy mappings: %v", result.Error), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(mappings)
 			return
 		}
 
+		// Get mappings for a specific charge point
 		mappings, err := s.dbService.GetChargePointProxyMappings(chargePointID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error fetching proxy mappings: %v", err), http.StatusInternalServerError)
@@ -898,12 +980,42 @@ func (s *APIServerWithDB) handleProxyMappings(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		// Set timestamps
-		now := time.Now()
-		if mapping.CreatedAt.IsZero() {
-			mapping.CreatedAt = now
+		// Check if this is an update or a new mapping
+		isUpdate := mapping.ID > 0
+
+		// For updates, check if the mapping exists
+		if isUpdate {
+			var existing database.ChargePointProxyMapping
+			result := s.dbService.GetDB().First(&existing, mapping.ID)
+			if result.Error != nil {
+				http.Error(w, fmt.Sprintf("Proxy mapping not found: %v", result.Error), http.StatusNotFound)
+				return
+			}
+
+			// Preserve creation timestamp
+			mapping.CreatedAt = existing.CreatedAt
+		} else {
+			// Check if a mapping already exists for this charge point and destination
+			var existing database.ChargePointProxyMapping
+			result := s.dbService.GetDB().Where(
+				"charge_point_id = ? AND proxy_destination_id = ?",
+				mapping.ChargePointID,
+				mapping.ProxyDestinationID,
+			).First(&existing)
+
+			if result.Error == nil {
+				// Mapping exists, use its ID for an update
+				mapping.ID = existing.ID
+				mapping.CreatedAt = existing.CreatedAt
+				isUpdate = true
+			} else {
+				// New mapping
+				mapping.CreatedAt = time.Now()
+			}
 		}
-		mapping.UpdatedAt = now
+
+		// Always update timestamp
+		mapping.UpdatedAt = time.Now()
 
 		if err := s.dbService.SaveChargePointProxyMapping(&mapping); err != nil {
 			http.Error(w, fmt.Sprintf("Error saving proxy mapping: %v", err), http.StatusInternalServerError)
@@ -911,14 +1023,50 @@ func (s *APIServerWithDB) handleProxyMappings(w http.ResponseWriter, r *http.Req
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		if !isUpdate {
+			w.WriteHeader(http.StatusCreated)
+		}
 		json.NewEncoder(w).Encode(mapping)
 
 	case http.MethodDelete:
 		// Delete a proxy mapping
 		idStr := r.URL.Query().Get("id")
 		if idStr == "" {
-			http.Error(w, "id query parameter is required", http.StatusBadRequest)
+			// Try with chargePointId and proxyDestinationId
+			chargePointID := r.URL.Query().Get("chargePointId")
+			proxyDestIDStr := r.URL.Query().Get("proxyDestinationId")
+
+			if chargePointID != "" && proxyDestIDStr != "" {
+				proxyDestID, err := strconv.ParseUint(proxyDestIDStr, 10, 32)
+				if err != nil {
+					http.Error(w, "Invalid proxyDestinationId parameter", http.StatusBadRequest)
+					return
+				}
+
+				// Find mapping by charge point ID and proxy destination ID
+				var mapping database.ChargePointProxyMapping
+				result := s.dbService.GetDB().Where(
+					"charge_point_id = ? AND proxy_destination_id = ?",
+					chargePointID,
+					uint(proxyDestID),
+				).First(&mapping)
+
+				if result.Error != nil {
+					http.Error(w, fmt.Sprintf("Mapping not found: %v", result.Error), http.StatusNotFound)
+					return
+				}
+
+				// Delete the mapping
+				if err := s.dbService.GetDB().Delete(&mapping).Error; err != nil {
+					http.Error(w, fmt.Sprintf("Error deleting mapping: %v", err), http.StatusInternalServerError)
+					return
+				}
+
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
+			http.Error(w, "Either id or both chargePointId and proxyDestinationId must be provided", http.StatusBadRequest)
 			return
 		}
 
