@@ -79,6 +79,30 @@ func main() {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 
+	// After the server has started, connect all currently connected charge points to proxies
+	go func() {
+		// Give the server a moment to fully initialize
+		time.Sleep(2 * time.Second)
+
+		// Get all connected charge points
+		connectedChargePoints, err := dbService.ListConnectedChargePoints()
+		if err != nil {
+			log.Printf("Error fetching connected charge points for proxy setup: %v", err)
+			return
+		}
+
+		log.Printf("Setting up proxy connections for %d connected charge points", len(connectedChargePoints))
+
+		// Connect each one to its configured proxies
+		for _, cp := range connectedChargePoints {
+			if err := proxyManager.ConnectToProxies(cp.ID); err != nil {
+				log.Printf("Error connecting charge point %s to proxies: %v", cp.ID, err)
+			} else {
+				log.Printf("Successfully connected charge point %s to proxies", cp.ID)
+			}
+		}
+	}()
+
 	// Wait a moment for server startup logs to complete
 	time.Sleep(100 * time.Millisecond)
 
