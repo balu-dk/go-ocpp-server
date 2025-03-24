@@ -143,6 +143,12 @@ func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string,
 			}
 		}
 
+		// Forward the message to any configured proxies
+		if cs.proxyManager != nil {
+			log.Printf("Forwarding message from %s to proxies", chargePointID)
+			cs.proxyManager.ForwardToProxies(chargePointID, message)
+		}
+
 		// Parse OCPP message
 		log.Printf("Received message from %s: %s", chargePointID, message)
 
@@ -262,6 +268,12 @@ func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string,
 				if err := cs.dbLogger.LogRawMessage("SEND", chargePointID, responseJSON); err != nil {
 					log.Printf("Error logging raw message: %v", err)
 				}
+			}
+
+			// Forward the response to proxies as well
+			if cs.proxyManager != nil {
+				log.Printf("Forwarding response from %s to proxies", chargePointID)
+				cs.proxyManager.ForwardToProxies(chargePointID, responseJSON)
 			}
 
 			if err := conn.WriteJSON(callResult); err != nil {
