@@ -1110,3 +1110,8 @@ func (cs *CentralSystemHandlerWithDB) handleUnexpectedChargingStatus(chargePoint
 				transactionID, connectorId))
 	}
 }
+
+// GetProxyManager returns the proxy manager
+func (cs *CentralSystemHandlerWithDB) GetProxyManager() *ProxyManager {
+	return cs.proxyManager
+}

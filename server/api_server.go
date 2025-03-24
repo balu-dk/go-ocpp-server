@@ -128,6 +128,7 @@ func (s *APIServerWithDB) registerAPIEndpoints(mux *http.ServeMux) {
 	mux.HandleFunc("/api/proxy/charge-points", s.handleChargePointProxies)
 	mux.HandleFunc("/api/proxy/mappings", s.handleProxyMappings)
 	mux.HandleFunc("/api/proxy/logs", s.handleProxyLogs)
+	mux.HandleFunc("/api/proxy/connect", s.handleManualProxyConnect)
 }
 
 // Start initiates the API server
@@ -1151,4 +1152,54 @@ func (s *APIServerWithDB) handleProxyLogs(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleManualProxyConnect handles requests to manually connect a charge point to its proxies
+func (s *APIServerWithDB) handleManualProxyConnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var request struct {
+		ChargePointID string `json:"chargePointId"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if request.ChargePointID == "" {
+		http.Error(w, "chargePointId is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get the proxy manager from the OCPP server handler
+	handler := s.ocppServer.GetHandler()
+	if csHandler, ok := handler.(*ocppserver.CentralSystemHandlerWithDB); ok {
+		if csHandler.GetProxyManager() != nil {
+			err := csHandler.GetProxyManager().ManuallyConnectToProxies(request.ChargePointID)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to connect to proxies: %v", err), http.StatusInternalServerError)
+				return
+			}
+
+			// Return success response
+			response := struct {
+				Success bool   `json:"success"`
+				Message string `json:"message"`
+			}{
+				Success: true,
+				Message: fmt.Sprintf("Manually connected charge point %s to proxies", request.ChargePointID),
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+	}
+
+	http.Error(w, "Proxy manager not available", http.StatusInternalServerError)
 }

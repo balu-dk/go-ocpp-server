@@ -515,3 +515,14 @@ func (t *IDTransformer) ProcessIncoming(chargePointID string, message []byte) ([
 	// For error messages, no transformation
 	return message, false, nil
 }
+
+// ManuallyConnectToProxies forces connection to all configured proxies for a charge point
+func (pm *ProxyManager) ManuallyConnectToProxies(chargePointID string) error {
+	log.Printf("Manually connecting charge point %s to proxies", chargePointID)
+
+	// Disconnect any existing proxies first
+	pm.DisconnectProxiesForChargePoint(chargePointID)
+
+	// Then connect to all configured proxies
+	return pm.ConnectToProxies(chargePointID)
+}
