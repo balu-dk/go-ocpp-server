@@ -1195,19 +1195,19 @@ func (cs *CentralSystemHandlerWithDB) ForwardMessageToChargePoint(chargePointID 
 	if cs.dbLogger != nil {
 		if err := cs.dbLogger.LogRawMessage("SEND", chargePointID, message); err != nil {
 			log.Printf("Error logging raw forwarded message: %v", err)
+			// Continue anyway
 		}
 	}
 
-	// Forward the message
+	// Forward the message directly without additional processing
 	if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
 		cs.logEvent(chargePointID, "ERROR", "Proxy",
 			fmt.Sprintf("Failed to forward message from proxy to charge point: %v", err))
 		return fmt.Errorf("failed to send message to charge point: %v", err)
 	}
 
-	// Log the successful forwarding
 	cs.logEvent(chargePointID, "INFO", "Proxy",
-		fmt.Sprintf("Successfully forwarded message from proxy to charge point"))
+		"Successfully forwarded message from proxy to charge point")
 
 	return nil
 }

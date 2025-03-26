@@ -302,181 +302,86 @@ func (pm *ProxyManager) handleProxyMessages(chargePointID string, destinationID 
 			break
 		}
 
-		// Log the raw incoming message
-		log.Printf("PROXY RECEIVED [%d->%s]: %s", destinationID, chargePointID, string(message))
+		// Log the raw message for debugging
+		log.Printf("PROXY → CHARGER [%d→%s]: %s", destinationID, chargePointID, string(message))
 
-		// Parse the message to extract information
+		// Save to database for logging
+		proxyLog := &database.ProxyMessageLog{
+			ChargePointID:      chargePointID,
+			ProxyDestinationID: destinationID,
+			Timestamp:          time.Now(),
+			Direction:          "FROM_PROXY",
+			OriginalMessage:    string(message),
+		}
+
+		// Parse the message but don't modify it
 		var ocppMsg []interface{}
 		if err := json.Unmarshal(message, &ocppMsg); err != nil {
-			log.Printf("Error parsing proxy message: %v", err)
-			continue
+			log.Printf("Error parsing message from proxy (will forward anyway): %v", err)
+		} else {
+			// Just extract basic info for logging
+			if len(ocppMsg) >= 3 {
+				msgType, typeOk := ocppMsg[0].(float64)
+				messageID, idOk := ocppMsg[1].(string)
+
+				if typeOk && idOk && msgType == 2 && len(ocppMsg) >= 4 {
+					// This is a command (Call) message
+					action, actionOk := ocppMsg[2].(string)
+					if actionOk {
+						log.Printf("Proxy sent %s command (ID: %s) for charge point %s",
+							action, messageID, chargePointID)
+					}
+				}
+			}
 		}
 
-		// Check basic message validity
-		if len(ocppMsg) < 3 {
-			log.Printf("Invalid OCPP message format: %s", string(message))
-			continue
-		}
-
-		msgType, ok := ocppMsg[0].(float64)
-		if !ok {
-			log.Printf("Invalid message type: %v", ocppMsg[0])
-			continue
-		}
-
-		messageID, _ := ocppMsg[1].(string)
-
-		// For Call messages (type 2), we need to forward to charge point and wait for response
-		if msgType == 2 && len(ocppMsg) >= 4 {
-			action, _ := ocppMsg[2].(string)
-			log.Printf("Proxy command: %s (ID: %s) for charge point %s", action, messageID, chargePointID)
-
-			// Process the message through all processors
-			modifiedMessage := message
-			blocked := false
-			for _, processor := range pm.messageProcessors {
+		// Process the message through ID transformer only - no other processors
+		modifiedMessage := message
+		for _, processor := range pm.messageProcessors {
+			// Only apply ID transformer, skip other processors
+			if _, ok := processor.(*IDTransformer); ok {
 				var err error
-				modifiedMessage, blocked, err = processor.ProcessIncoming(chargePointID, modifiedMessage)
+				modifiedMessage, _, err = processor.ProcessIncoming(chargePointID, modifiedMessage)
 				if err != nil {
-					log.Printf("Error processing message from proxy: %v", err)
+					log.Printf("Error in ID transformation: %v", err)
+					// Continue with original message
+					modifiedMessage = message
 					break
 				}
-				if blocked {
-					log.Printf("Message from proxy to charge point %s was blocked", chargePointID)
-					break
-				}
 			}
+		}
 
-			// If message was blocked, don't forward it
-			if blocked {
-				continue
-			}
+		// Only log if the message was modified
+		if string(message) != string(modifiedMessage) {
+			proxyLog.WasModified = true
+			proxyLog.TransformedMessage = string(modifiedMessage)
+			log.Printf("Message was transformed for %s", chargePointID)
+		}
 
-			// Save to database for logging
-			proxyLog := &database.ProxyMessageLog{
-				ChargePointID:      chargePointID,
-				ProxyDestinationID: destinationID,
-				Timestamp:          time.Now(),
-				Direction:          "FROM_PROXY",
-				OriginalMessage:    string(message),
-				TransformedMessage: string(modifiedMessage),
-				WasModified:        string(message) != string(modifiedMessage),
-				WasBlocked:         blocked,
-			}
+		// Save to log database
+		if err := pm.dbService.SaveProxyMessageLog(proxyLog); err != nil {
+			log.Printf("Error saving proxy message log: %v", err)
+		}
 
-			if err := pm.dbService.SaveProxyMessageLog(proxyLog); err != nil {
-				log.Printf("Error saving proxy message log: %v", err)
-			}
+		// Forward directly to charge point regardless of message type
+		if pm.centralHandler == nil {
+			log.Printf("ERROR: Cannot forward message - no central handler available")
+			continue
+		}
 
-			// Check if central handler exists
-			if pm.centralHandler == nil {
-				log.Printf("ERROR: Cannot forward - no central handler available")
-
-				// Create error response to send back to proxy
-				errorResp := []interface{}{4, messageID, "InternalError", "No central handler available", map[string]interface{}{}}
-				errorMsg, _ := json.Marshal(errorResp)
-
-				// Send error response to proxy
-				if err := conn.WriteMessage(websocket.TextMessage, errorMsg); err != nil {
-					log.Printf("Error sending error response to proxy: %v", err)
-				}
-
-				continue
-			}
-
-			// Create a channel to receive the response
-			responseChan := make(chan []byte, 1)
-
-			// Register the message ID so we can capture the response
-			pm.registerProxyRequest(messageID, responseChan)
-
-			// Forward the message to the charge point
-			log.Printf("Forwarding command to charge point %s: %s", chargePointID, string(modifiedMessage))
-			err = pm.centralHandler.ForwardMessageToChargePoint(chargePointID, modifiedMessage)
-
-			if err != nil {
-				log.Printf("ERROR forwarding command to charge point %s: %v", chargePointID, err)
-
-				// Create error response to send back to proxy
-				errorResp := []interface{}{4, messageID, "InternalError", fmt.Sprintf("Failed to forward command: %v", err), map[string]interface{}{}}
-				errorMsg, _ := json.Marshal(errorResp)
-
-				// Send error response to proxy
-				if err := conn.WriteMessage(websocket.TextMessage, errorMsg); err != nil {
-					log.Printf("Error sending error response to proxy: %v", err)
-				}
-
-				// Clean up
-				pm.unregisterProxyRequest(messageID)
-				continue
-			}
-
-			// Wait for response from charge point with timeout
-			select {
-			case response := <-responseChan:
-				// We got a response, forward it to the proxy
-				log.Printf("Received response from charge point, forwarding to proxy: %s", string(response))
-
-				if err := conn.WriteMessage(websocket.TextMessage, response); err != nil {
-					log.Printf("Error forwarding response to proxy: %v", err)
-				} else {
-					log.Printf("Successfully forwarded response to proxy")
-				}
-
-			case <-time.After(30 * time.Second):
-				log.Printf("Timeout waiting for response from charge point %s", chargePointID)
-
-				// Create timeout error response
-				errorResp := []interface{}{4, messageID, "GenericError", "Timeout waiting for charge point response", map[string]interface{}{}}
-				errorMsg, _ := json.Marshal(errorResp)
-
-				// Send error response to proxy
-				if err := conn.WriteMessage(websocket.TextMessage, errorMsg); err != nil {
-					log.Printf("Error sending timeout response to proxy: %v", err)
-				}
-			}
-
-			// Clean up
-			pm.unregisterProxyRequest(messageID)
-
-		} else if msgType == 3 || msgType == 4 {
-			// This is a response or error to a request we sent to the proxy
-			// We don't need to do anything with these currently
-			log.Printf("Received response/error from proxy: %s", string(message))
+		// Just forward the message directly to the charge point
+		log.Printf("Forwarding message from proxy to charge point %s", chargePointID)
+		err = pm.centralHandler.ForwardMessageToChargePoint(chargePointID, modifiedMessage)
+		if err != nil {
+			log.Printf("ERROR: Failed to forward message to charge point %s: %v", chargePointID, err)
+		} else {
+			log.Printf("Successfully forwarded message to charge point %s", chargePointID)
 		}
 	}
 }
 
 // ForwardToProxies forwards a message from a charge point to all proxy destinations
 func (pm *ProxyManager) ForwardToProxies(chargePointID string, message []byte) {
-	// Parse the message to check if it's a response to a proxy request
-	var ocppMsg []interface{}
-	if err := json.Unmarshal(message, &ocppMsg); err != nil {
-		log.Printf("Error parsing message for proxy forwarding: %v", err)
-		// Continue anyway with the original message
-	} else {
-		// Check if this is a response (CallResult) or error (CallError)
-		if len(ocppMsg) >= 2 {
-			msgType, typeOk := ocppMsg[0].(float64)
-			messageID, idOk := ocppMsg[1].(string)
-
-			if typeOk && idOk && (msgType == 3 || msgType == 4) {
-				// This is a response to a command - check if it's for a proxy request
-				log.Printf("Checking if response ID %s is for a proxy request", messageID)
-
-				responseChan, exists := pm.getResponseChannel(messageID)
-				if exists {
-					// This is a response to a proxy request, send it to the channel
-					log.Printf("Found pending proxy request for ID %s, forwarding response", messageID)
-					responseChan <- message
-					return // We've handled this message, no need to forward to proxies
-				}
-			}
-		}
-	}
-
-	// Continue with normal proxy forwarding for non-response messages
-
 	// Check if proxying is enabled for this charge point
 	proxyConfig, err := pm.dbService.GetChargePointProxy(chargePointID)
 	if err != nil || !proxyConfig.ProxyEnabled {
@@ -494,7 +399,17 @@ func (pm *ProxyManager) ForwardToProxies(chargePointID string, message []byte) {
 		return
 	}
 
-	// Process through message processors
+	// Log the message for debugging
+	log.Printf("CHARGER → PROXY [%s→]: %s", chargePointID, string(message))
+
+	// Parse the message for ID transformation
+	var ocppMsg []interface{}
+	if err := json.Unmarshal(message, &ocppMsg); err != nil {
+		log.Printf("Error parsing message for forwarding: %v", err)
+		// Continue anyway with the original message
+	}
+
+	// Forward to each configured proxy destination
 	for _, dest := range destinations {
 		destID := dest.ID
 
@@ -507,19 +422,19 @@ func (pm *ProxyManager) ForwardToProxies(chargePointID string, message []byte) {
 			OriginalMessage:    string(message),
 		}
 
-		// Process the message through all processors
+		// Process the message through transformers only
 		modifiedMessage := message
-		blocked := false
 		for _, processor := range pm.messageProcessors {
-			var err error
-			modifiedMessage, blocked, err = processor.ProcessOutgoing(chargePointID, modifiedMessage)
-			if err != nil {
-				log.Printf("Error processing message to proxy: %v", err)
-				break
-			}
-			if blocked {
-				proxyLog.WasBlocked = true
-				break
+			// Only apply ID transformer, skip other processors
+			if _, ok := processor.(*IDTransformer); ok {
+				var err error
+				modifiedMessage, _, err = processor.ProcessOutgoing(chargePointID, modifiedMessage)
+				if err != nil {
+					log.Printf("Error in ID transformation: %v", err)
+					// Continue with original message
+					modifiedMessage = message
+					break
+				}
 			}
 		}
 
@@ -530,15 +445,9 @@ func (pm *ProxyManager) ForwardToProxies(chargePointID string, message []byte) {
 			proxyLog.TransformedMessage = string(modifiedMessage)
 		}
 
-		// Save the log
+		// Save to log database
 		if err := pm.dbService.SaveProxyMessageLog(proxyLog); err != nil {
 			log.Printf("Error saving proxy message log: %v", err)
-		}
-
-		// If the message is blocked, don't forward it
-		if blocked {
-			log.Printf("Message from charge point %s to proxy %s was blocked", chargePointID, dest.Name)
-			continue
 		}
 
 		// Get the connection
@@ -574,7 +483,7 @@ func (pm *ProxyManager) ForwardToProxies(chargePointID string, message []byte) {
 		}
 
 		// Send the modified message to the proxy
-		log.Printf("Sending message to proxy %s: %s", dest.Name, string(modifiedMessage))
+		log.Printf("Sending message to proxy %s", dest.Name)
 		if err := conn.WriteMessage(websocket.TextMessage, modifiedMessage); err != nil {
 			log.Printf("Error writing to proxy: %v", err)
 
@@ -638,6 +547,7 @@ func NewIDTransformer(dbService *database.Service, manager *ProxyManager) *IDTra
 }
 
 // ProcessOutgoing transforms outgoing messages (from charge point to proxy)
+// ProcessOutgoing transforms outgoing messages (from charge point to proxy)
 func (t *IDTransformer) ProcessOutgoing(chargePointID string, message []byte) ([]byte, bool, error) {
 	// Parse the OCPP message
 	var ocppMsg []interface{}
@@ -656,7 +566,7 @@ func (t *IDTransformer) ProcessOutgoing(chargePointID string, message []byte) ([
 		return message, false, nil
 	}
 
-	// Get action if it's a Call (requests)
+	// For StartTransaction requests, we might need to transform the idTag
 	if msgTypeID == 2 && len(ocppMsg) >= 4 {
 		action, ok := ocppMsg[2].(string)
 		if !ok {
@@ -669,20 +579,24 @@ func (t *IDTransformer) ProcessOutgoing(chargePointID string, message []byte) ([
 			return message, false, nil
 		}
 
-		// For BootNotification or any other message that might contain the charge point ID
-		switch action {
-		case "BootNotification":
-			// Extract the payload
+		// Transform identifiers in specific messages
+		if action == "StartTransaction" || action == "Authorize" {
 			payload, ok := ocppMsg[3].(map[string]interface{})
 			if !ok {
 				return message, false, nil
 			}
 
-			// Transform any identifiers in the payload
-			if serialNumber, ok := payload["chargePointSerialNumber"].(string); ok {
-				// Only transform if it matches the charge point ID
-				if serialNumber == chargePointID {
-					payload["chargePointSerialNumber"] = t.manager.GetTransformedID(chargePointID, proxyConfig)
+			// Transform idTag if present
+			if idTag, ok := payload["idTag"].(string); ok {
+				transformedID := proxyConfig.IDTransformPrefix + idTag + proxyConfig.IDTransformSuffix
+				if transformedID != idTag {
+					payload["idTag"] = transformedID
+
+					// Store the mapping
+					t.manager.mutex.Lock()
+					t.manager.transformedIDs[idTag] = transformedID
+					t.manager.reverseIDMapping[transformedID] = idTag
+					t.manager.mutex.Unlock()
 				}
 			}
 
@@ -699,7 +613,28 @@ func (t *IDTransformer) ProcessOutgoing(chargePointID string, message []byte) ([
 		}
 	}
 
-	// For most messages, no transformation is needed
+	// For StopTransaction, we need to transform transaction IDs
+	if msgTypeID == 2 && len(ocppMsg) >= 4 {
+		action, ok := ocppMsg[2].(string)
+		if !ok {
+			return message, false, nil
+		}
+
+		if action == "StopTransaction" {
+			payload, ok := ocppMsg[3].(map[string]interface{})
+			if !ok {
+				return message, false, nil
+			}
+
+			// Store mapping between transaction IDs if needed
+			if txID, ok := payload["transactionId"].(float64); ok {
+				log.Printf("Outgoing StopTransaction with transactionId %v", txID)
+				// We could map transaction IDs here if needed
+			}
+		}
+	}
+
+	// Never block or modify other message types
 	return message, false, nil
 }
 
@@ -722,26 +657,12 @@ func (t *IDTransformer) ProcessIncoming(chargePointID string, message []byte) ([
 		return message, false, nil
 	}
 
-	// Get message ID for debugging
-	messageID, _ := ocppMsg[1].(string)
-
-	// For responses (CallResult), we generally don't need to transform
-	if msgTypeID == 3 {
-		log.Printf("Processing CallResult message ID %s for %s (no transformation needed)",
-			messageID, chargePointID)
-		return message, false, nil
-	}
-
 	// For requests from proxy (Call), we might need to transform
 	if msgTypeID == 2 && len(ocppMsg) >= 4 {
 		action, ok := ocppMsg[2].(string)
 		if !ok {
 			return message, false, nil
 		}
-
-		// Add detailed logging for all actions
-		log.Printf("Processing incoming proxy message: Action=%s for chargePoint=%s with ID %s",
-			action, chargePointID, messageID)
 
 		// Get proxy config for this charge point
 		proxyConfig, err := t.dbService.GetChargePointProxy(chargePointID)
@@ -760,33 +681,17 @@ func (t *IDTransformer) ProcessIncoming(chargePointID string, message []byte) ([
 		// Transform IDs in the payload based on action
 		switch action {
 		case "RemoteStartTransaction":
-			log.Printf("Processing RemoteStartTransaction: %+v", payload)
-
 			if idTag, ok := payload["idTag"].(string); ok {
 				// Check if the idTag is a transformed ID
 				originalID, exists := t.manager.GetOriginalID(idTag)
 				if exists {
 					payload["idTag"] = originalID
 					log.Printf("Transformed proxy idTag %s to original %s", idTag, originalID)
-				} else {
-					log.Printf("Using idTag %s as-is (no transformation)", idTag)
 				}
 			}
 
-			// Check connector ID if present
-			if connID, ok := payload["connectorId"].(float64); ok {
-				log.Printf("RemoteStartTransaction for connector %v", connID)
-			} else {
-				log.Printf("RemoteStartTransaction with no specific connector")
-			}
-
 		case "RemoteStopTransaction":
-			log.Printf("Processing RemoteStopTransaction: %+v", payload)
-
-			// For RemoteStopTransaction, we need to ensure the transaction exists
 			if txID, ok := payload["transactionId"].(float64); ok {
-				log.Printf("Checking transaction ID %v for charge point %s", txID, chargePointID)
-
 				// Try to translate the transaction ID
 				if t.manager != nil {
 					localTxID, err := t.manager.TranslateProxyTransactionID(chargePointID, txID)
@@ -797,68 +702,8 @@ func (t *IDTransformer) ProcessIncoming(chargePointID string, message []byte) ([
 							txID, localTxID)
 						payload["transactionId"] = localTxID
 					}
-				} else {
-					// Fallback if manager isn't available: look for active transactions
-					transactions, err := t.dbService.GetIncompleteTransactions(chargePointID)
-					if err != nil {
-						log.Printf("Warning: Could not get incomplete transactions for %s: %v",
-							chargePointID, err)
-					} else {
-						if len(transactions) == 0 {
-							log.Printf("Warning: No active transactions found for %s but received RemoteStopTransaction",
-								chargePointID)
-						} else if len(transactions) == 1 {
-							// If there's only one active transaction, use its ID
-							actualTxID := transactions[0].TransactionID
-							if actualTxID != int(txID) {
-								log.Printf("Adapting transaction ID from %v to %d (the only active transaction)",
-									txID, actualTxID)
-								payload["transactionId"] = float64(actualTxID)
-							}
-						} else {
-							log.Printf("Found %d active transactions for %s:", len(transactions), chargePointID)
-							for _, tx := range transactions {
-								log.Printf("  Active transaction: ID=%d, connector=%d",
-									tx.TransactionID, tx.ConnectorID)
-							}
-							// Don't automatically adapt if there are multiple active transactions
-						}
-					}
 				}
 			}
-
-		case "GetConfiguration":
-			// No ID transformations needed
-			log.Printf("Processing GetConfiguration: %+v", payload)
-
-		case "ChangeConfiguration":
-			// No ID transformations needed
-			log.Printf("Processing ChangeConfiguration: key=%v, value=%v",
-				payload["key"], payload["value"])
-
-		case "Reset":
-			// No ID transformations needed
-			log.Printf("Processing Reset: type=%v", payload["type"])
-
-		case "UnlockConnector":
-			// No ID transformations needed, but log the connector ID
-			if connID, ok := payload["connectorId"].(float64); ok {
-				log.Printf("Processing UnlockConnector for connector %v", connID)
-			}
-
-		case "ClearCache":
-			// No ID transformations needed
-			log.Printf("Processing ClearCache command")
-
-		case "TriggerMessage":
-			// No ID transformations needed
-			if requested, ok := payload["requestedMessage"].(string); ok {
-				log.Printf("Processing TriggerMessage: %s", requested)
-			}
-
-		default:
-			// For any other actions, just log them
-			log.Printf("Processing %s command (no special handling)", action)
 		}
 
 		// Replace the payload in the message
@@ -870,23 +715,10 @@ func (t *IDTransformer) ProcessIncoming(chargePointID string, message []byte) ([
 			return message, false, fmt.Errorf("error serializing modified message: %v", err)
 		}
 
-		// Only log if there was a change
-		if string(message) != string(modifiedMsg) {
-			log.Printf("Transformed message from proxy for %s: %s -> %s",
-				chargePointID, string(message), string(modifiedMsg))
-		}
 		return modifiedMsg, false, nil
 	}
 
-	// For error messages, no transformation
-	if msgTypeID == 4 {
-		// But we should still log it
-		errorCode, _ := ocppMsg[2].(string)
-		errorDesc, _ := ocppMsg[3].(string)
-		log.Printf("Processing CallError message for %s: %s - %s",
-			chargePointID, errorCode, errorDesc)
-	}
-
+	// Never block or modify other message types
 	return message, false, nil
 }
 
@@ -939,11 +771,10 @@ func (pm *ProxyManager) TranslateProxyTransactionID(chargePointID string, extern
 		} else {
 			log.Printf("WARNING: Transaction %d exists but belongs to charge point %s, not %s",
 				int(externalID), tx.ChargePointID, chargePointID)
-			// We could potentially return an error here, but let's continue
+			// We'll continue looking for transactions on this charge point
 		}
 	}
 
-	// If we get here, either the transaction doesn't exist or belongs to a different charge point
 	// Get all incomplete transactions for this charge point
 	transactions, err := pm.dbService.GetIncompleteTransactions(chargePointID)
 	if err != nil {
@@ -969,37 +800,6 @@ func (pm *ProxyManager) TranslateProxyTransactionID(chargePointID string, extern
 			tx.TransactionID, tx.ConnectorID, tx.IdTag)
 	}
 
-	// As a fallback, we'll return the most recent transaction ID
-	mostRecent := transactions[0]
-	for _, tx := range transactions {
-		if tx.StartTimestamp.After(mostRecent.StartTimestamp) {
-			mostRecent = tx
-		}
-	}
-
-	log.Printf("Multiple transactions found - using most recent transaction ID %d for charge point %s",
-		mostRecent.TransactionID, chargePointID)
-	return float64(mostRecent.TransactionID), nil
-}
-
-// Register a proxy request to capture the response
-func (pm *ProxyManager) registerProxyRequest(messageID string, responseChan chan []byte) {
-	pm.pendingMutex.Lock()
-	defer pm.pendingMutex.Unlock()
-	pm.pendingProxyRequests[messageID] = responseChan
-}
-
-// Unregister a proxy request
-func (pm *ProxyManager) unregisterProxyRequest(messageID string) {
-	pm.pendingMutex.Lock()
-	defer pm.pendingMutex.Unlock()
-	delete(pm.pendingProxyRequests, messageID)
-}
-
-// Get the response channel for a message ID
-func (pm *ProxyManager) getResponseChannel(messageID string) (chan []byte, bool) {
-	pm.pendingMutex.RLock()
-	defer pm.pendingMutex.RUnlock()
-	ch, exists := pm.pendingProxyRequests[messageID]
-	return ch, exists
+	// Just return the original ID to be safe
+	return externalID, fmt.Errorf("multiple active transactions, using original ID")
 }
