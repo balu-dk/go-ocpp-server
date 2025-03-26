@@ -148,3 +148,12 @@ type ProxyMessageLog struct {
 	WasModified        bool      `json:"wasModified"`
 	WasBlocked         bool      `json:"wasBlocked"`
 }
+
+type TransactionMapping struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	ChargePointID string    `json:"chargePointId"`
+	LocalTxID     int       `json:"localTxId"`    // Your transaction ID
+	ExternalTxID  int       `json:"externalTxId"` // Proxy system's transaction ID
+	ProxyID       uint      `json:"proxyId"`      // ID of the proxy destination
+	CreatedAt     time.Time `json:"createdAt"`
+}

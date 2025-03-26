@@ -641,3 +641,29 @@ func (s *Service) SaveProxyMessageLog(log *ProxyMessageLog) error {
 	result := s.db.Create(log)
 	return result.Error
 }
+
+// SaveTransactionMapping saves a mapping between local and external transaction IDs
+func (s *Service) SaveTransactionMapping(mapping *TransactionMapping) error {
+	result := s.db.Save(mapping)
+	return result.Error
+}
+
+// GetTransactionMappingByLocal gets mapping by local transaction ID
+func (s *Service) GetTransactionMappingByLocal(chargePointID string, localTxID int) (*TransactionMapping, error) {
+	var mapping TransactionMapping
+	result := s.db.Where("charge_point_id = ? AND local_tx_id = ?", chargePointID, localTxID).First(&mapping)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &mapping, nil
+}
+
+// GetTransactionMappingByExternal gets mapping by external transaction ID
+func (s *Service) GetTransactionMappingByExternal(chargePointID string, externalTxID int) (*TransactionMapping, error) {
+	var mapping TransactionMapping
+	result := s.db.Where("charge_point_id = ? AND external_tx_id = ?", chargePointID, externalTxID).First(&mapping)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &mapping, nil
+}

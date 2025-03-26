@@ -395,6 +395,56 @@ func (pm *ProxyManager) ForwardToProxies(chargePointID string, message []byte) {
 		return
 	}
 
+	// Parse the message for logging and processing
+	var ocppMsg []interface{}
+	if err := json.Unmarshal(message, &ocppMsg); err != nil {
+		log.Printf("Error parsing message for forwarding: %v", err)
+		// Continue anyway with the original message
+	} else {
+		// Extract message type and other info for logging
+		if len(ocppMsg) >= 3 {
+			msgTypeID, typeOk := ocppMsg[0].(float64)
+			messageID, idOk := ocppMsg[1].(string)
+
+			if typeOk && idOk {
+				// For response messages (type 3)
+				if msgTypeID == 3 {
+					log.Printf("Forwarding response message ID %s to proxies for %s",
+						messageID, chargePointID)
+
+					// For StartTransaction responses, we might want to store transaction ID mappings
+					// This would need a lookup to find what the original request was
+				}
+
+				// For request messages (type 2)
+				if msgTypeID == 2 && len(ocppMsg) >= 4 {
+					action, actionOk := ocppMsg[2].(string)
+					if actionOk {
+						log.Printf("Forwarding %s request to proxies for %s", action, chargePointID)
+
+						// For StartTransaction requests, check if we need to store transaction mapping
+						if action == "StartTransaction" {
+							payload, payloadOk := ocppMsg[3].(map[string]interface{})
+							if payloadOk {
+								log.Printf("Processing StartTransaction for forwarding: %+v", payload)
+								// We could store info here if needed
+							}
+						}
+
+						// For StopTransaction requests
+						if action == "StopTransaction" {
+							payload, payloadOk := ocppMsg[3].(map[string]interface{})
+							if payloadOk {
+								log.Printf("Processing StopTransaction for forwarding: %+v", payload)
+								// We could adapt transaction IDs here if needed
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Process through message processors
 	for _, dest := range destinations {
 		destID := dest.ID
@@ -442,17 +492,6 @@ func (pm *ProxyManager) ForwardToProxies(chargePointID string, message []byte) {
 			continue
 		}
 
-		// We need to transform OCPP messages for ID transformation
-		var ocppMsg []interface{}
-		if err := json.Unmarshal(modifiedMessage, &ocppMsg); err != nil {
-			log.Printf("Error parsing OCPP message for proxy: %v", err)
-			continue
-		}
-
-		// For special messages that include the charge point ID, we need to transform it
-		// This is primarily for BootNotification which contains chargePointSerialNumber
-		// We need to parse the object based on the message type
-
 		// Get the connection
 		pm.mutex.RLock()
 		connections, exists := pm.proxyConnections[destID]
@@ -496,6 +535,9 @@ func (pm *ProxyManager) ForwardToProxies(chargePointID string, message []byte) {
 			pm.mutex.Lock()
 			delete(pm.proxyConnections[destID], chargePointID)
 			pm.mutex.Unlock()
+		} else {
+			log.Printf("Successfully forwarded message to proxy %s for charge point %s",
+				dest.Name, chargePointID)
 		}
 	}
 }
@@ -613,7 +655,6 @@ func (t *IDTransformer) ProcessOutgoing(chargePointID string, message []byte) ([
 }
 
 // ProcessIncoming transforms incoming messages (from proxy to charge point)
-// ProcessIncoming transforms incoming messages (from proxy to charge point)
 func (t *IDTransformer) ProcessIncoming(chargePointID string, message []byte) ([]byte, bool, error) {
 	// Parse the OCPP message
 	var ocppMsg []interface{}
@@ -695,61 +736,80 @@ func (t *IDTransformer) ProcessIncoming(chargePointID string, message []byte) ([
 
 			// For RemoteStopTransaction, we need to ensure the transaction exists
 			if txID, ok := payload["transactionId"].(float64); ok {
-				log.Printf("Received RemoteStopTransaction for transaction ID %v", txID)
+				log.Printf("Checking transaction ID %v for charge point %s", txID, chargePointID)
 
-				// Get active transactions for this charge point
-				transactions, err := t.dbService.GetIncompleteTransactions(chargePointID)
-				if err != nil {
-					log.Printf("Warning: Could not get incomplete transactions for %s: %v",
-						chargePointID, err)
-				} else {
-					if len(transactions) == 0 {
-						log.Printf("Warning: No active transactions found for %s but received RemoteStopTransaction",
-							chargePointID)
-					} else {
-						log.Printf("Found %d active transactions for %s", len(transactions), chargePointID)
-
-						// Check if our transaction ID exists
-						transactionExists := false
-						for _, tx := range transactions {
-							log.Printf("  Active transaction: ID=%d, connector=%d",
-								tx.TransactionID, tx.ConnectorID)
-
-							if tx.TransactionID == int(txID) {
-								transactionExists = true
-								log.Printf("  Found matching transaction ID %d", tx.TransactionID)
-							}
-						}
-
-						// If transaction doesn't exist, we might need to adapt it
-						if !transactionExists && len(transactions) == 1 {
-							// Special case: if there's only one transaction and the ID doesn't match,
-							// this might be a proxy using a different transaction ID system
-							// To be safer, we'll use the actual transaction ID we have
-							actualTxID := transactions[0].TransactionID
-							log.Printf("WARNING: Transaction ID %v not found, but there is one active transaction with ID %d. Adapting transaction ID.",
-								txID, actualTxID)
-
-							// Replace the transaction ID in the payload
-							payload["transactionId"] = float64(actualTxID)
-						}
+				// Try to translate the transaction ID
+				if t.manager != nil {
+					localTxID, err := t.manager.TranslateProxyTransactionID(chargePointID, txID)
+					if err != nil {
+						log.Printf("Warning: Could not translate transaction ID: %v", err)
+					} else if localTxID != txID {
+						log.Printf("Translating external transaction ID %v to local transaction ID %v",
+							txID, localTxID)
+						payload["transactionId"] = localTxID
 					}
-				}
-
-				// Let's also try to look up the specific transaction in the database
-				tx, err := t.dbService.GetTransaction(int(txID))
-				if err != nil {
-					log.Printf("Transaction %v not found in database: %v", txID, err)
 				} else {
-					if tx.ChargePointID != chargePointID {
-						log.Printf("WARNING: Transaction %v belongs to charge point %s but command is being sent to %s",
-							txID, tx.ChargePointID, chargePointID)
-
-						// We could potentially redirect the command to the correct charge point,
-						// but for now we'll just log the warning
+					// Fallback if manager isn't available: look for active transactions
+					transactions, err := t.dbService.GetIncompleteTransactions(chargePointID)
+					if err != nil {
+						log.Printf("Warning: Could not get incomplete transactions for %s: %v",
+							chargePointID, err)
+					} else {
+						if len(transactions) == 0 {
+							log.Printf("Warning: No active transactions found for %s but received RemoteStopTransaction",
+								chargePointID)
+						} else if len(transactions) == 1 {
+							// If there's only one active transaction, use its ID
+							actualTxID := transactions[0].TransactionID
+							if actualTxID != int(txID) {
+								log.Printf("Adapting transaction ID from %v to %d (the only active transaction)",
+									txID, actualTxID)
+								payload["transactionId"] = float64(actualTxID)
+							}
+						} else {
+							log.Printf("Found %d active transactions for %s:", len(transactions), chargePointID)
+							for _, tx := range transactions {
+								log.Printf("  Active transaction: ID=%d, connector=%d",
+									tx.TransactionID, tx.ConnectorID)
+							}
+							// Don't automatically adapt if there are multiple active transactions
+						}
 					}
 				}
 			}
+
+		case "GetConfiguration":
+			// No ID transformations needed
+			log.Printf("Processing GetConfiguration: %+v", payload)
+
+		case "ChangeConfiguration":
+			// No ID transformations needed
+			log.Printf("Processing ChangeConfiguration: key=%v, value=%v",
+				payload["key"], payload["value"])
+
+		case "Reset":
+			// No ID transformations needed
+			log.Printf("Processing Reset: type=%v", payload["type"])
+
+		case "UnlockConnector":
+			// No ID transformations needed, but log the connector ID
+			if connID, ok := payload["connectorId"].(float64); ok {
+				log.Printf("Processing UnlockConnector for connector %v", connID)
+			}
+
+		case "ClearCache":
+			// No ID transformations needed
+			log.Printf("Processing ClearCache command")
+
+		case "TriggerMessage":
+			// No ID transformations needed
+			if requested, ok := payload["requestedMessage"].(string); ok {
+				log.Printf("Processing TriggerMessage: %s", requested)
+			}
+
+		default:
+			// For any other actions, just log them
+			log.Printf("Processing %s command (no special handling)", action)
 		}
 
 		// Replace the payload in the message
@@ -763,7 +823,7 @@ func (t *IDTransformer) ProcessIncoming(chargePointID string, message []byte) ([
 
 		// Only log if there was a change
 		if string(message) != string(modifiedMsg) {
-			log.Printf("Processed message from proxy for %s: %s -> %s",
+			log.Printf("Transformed message from proxy for %s: %s -> %s",
 				chargePointID, string(message), string(modifiedMsg))
 		}
 		return modifiedMsg, false, nil
@@ -815,4 +875,60 @@ func (pm *ProxyManager) StartProxyHealthCheck() {
 			}
 		}
 	}()
+}
+
+// TranslateProxyTransactionID attempts to find the correct transaction ID to use
+// for a charge point when receiving a remote start/stop command
+func (pm *ProxyManager) TranslateProxyTransactionID(chargePointID string, externalID float64) (float64, error) {
+	// First, see if the transaction with this ID exists
+	tx, err := pm.dbService.GetTransaction(int(externalID))
+	if err == nil {
+		// Transaction exists, check if it belongs to this charge point
+		if tx.ChargePointID == chargePointID {
+			log.Printf("Found matching transaction ID %d for charge point %s", int(externalID), chargePointID)
+			return externalID, nil
+		} else {
+			log.Printf("WARNING: Transaction %d exists but belongs to charge point %s, not %s",
+				int(externalID), tx.ChargePointID, chargePointID)
+			// We could potentially return an error here, but let's continue
+		}
+	}
+
+	// If we get here, either the transaction doesn't exist or belongs to a different charge point
+	// Get all incomplete transactions for this charge point
+	transactions, err := pm.dbService.GetIncompleteTransactions(chargePointID)
+	if err != nil {
+		return externalID, fmt.Errorf("could not get transactions for charge point %s: %v", chargePointID, err)
+	}
+
+	if len(transactions) == 0 {
+		// No transactions to map to
+		return externalID, fmt.Errorf("no active transactions found for charge point %s", chargePointID)
+	}
+
+	if len(transactions) == 1 {
+		// There's only one active transaction, so we can safely assume this is the one
+		log.Printf("Translating external transaction ID %v to local transaction ID %d for charge point %s",
+			externalID, transactions[0].TransactionID, chargePointID)
+		return float64(transactions[0].TransactionID), nil
+	}
+
+	// Multiple transactions - this is trickier
+	log.Printf("WARNING: Multiple active transactions (%d) for charge point %s", len(transactions), chargePointID)
+	for _, tx := range transactions {
+		log.Printf("  Transaction ID: %d, Connector: %d, IdTag: %s",
+			tx.TransactionID, tx.ConnectorID, tx.IdTag)
+	}
+
+	// As a fallback, we'll return the most recent transaction ID
+	mostRecent := transactions[0]
+	for _, tx := range transactions {
+		if tx.StartTimestamp.After(mostRecent.StartTimestamp) {
+			mostRecent = tx
+		}
+	}
+
+	log.Printf("Multiple transactions found - using most recent transaction ID %d for charge point %s",
+		mostRecent.TransactionID, chargePointID)
+	return float64(mostRecent.TransactionID), nil
 }
