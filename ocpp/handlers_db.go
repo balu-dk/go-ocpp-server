@@ -193,6 +193,19 @@ func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string,
 
 				// Pass to command manager to handle
 				cs.GetCommandManager().HandleCommandResponse(uniqueID, responsePayload)
+
+				// ALSO check if this is a response to a proxy request and forward it
+				if cs.proxyManager != nil {
+					// Create the full response message
+					responseMsg, err := json.Marshal(ocppMsg)
+					if err != nil {
+						log.Printf("Error marshaling response message: %v", err)
+					} else {
+						// Forward to proxies to check for pending requests
+						log.Printf("Forwarding response to proxy manager: %s", string(responseMsg))
+						cs.proxyManager.ForwardToProxies(chargePointID, responseMsg)
+					}
+				}
 			}
 			continue
 		}
@@ -211,6 +224,19 @@ func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string,
 				cs.logEvent(chargePointID, "ERROR", "ChargePoint",
 					fmt.Sprintf("Error response for message %s: %s - %s",
 						uniqueID, errorCode, errorDescription))
+
+				// ALSO check if this is a response to a proxy request and forward it
+				if cs.proxyManager != nil {
+					// Create the full error message
+					errorMsg, err := json.Marshal(ocppMsg)
+					if err != nil {
+						log.Printf("Error marshaling error message: %v", err)
+					} else {
+						// Forward to proxies to check for pending requests
+						log.Printf("Forwarding error to proxy manager: %s", string(errorMsg))
+						cs.proxyManager.ForwardToProxies(chargePointID, errorMsg)
+					}
+				}
 			}
 			continue
 		}
