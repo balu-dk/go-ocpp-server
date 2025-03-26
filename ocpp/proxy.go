@@ -141,6 +141,145 @@ func (pm *ProxyManager) connectToProxy(originalID, transformedID string, destina
 	return nil
 }
 
+func getMessageTypeLog(message []byte) string {
+	var ocppMsg []interface{}
+	if err := json.Unmarshal(message, &ocppMsg); err != nil {
+		return "unknown (JSON parse error)"
+	}
+
+	if len(ocppMsg) < 3 {
+		return "invalid (insufficient elements)"
+	}
+
+	msgTypeID, ok := ocppMsg[0].(float64)
+	if !ok {
+		return "unknown message type"
+	}
+
+	if msgTypeID == 2 && len(ocppMsg) >= 3 {
+		// This is a Call message with an action
+		action, ok := ocppMsg[2].(string)
+		if ok {
+			messageID, _ := ocppMsg[1].(string)
+			return fmt.Sprintf("Call(%s) ID=%s", action, messageID)
+		}
+	}
+
+	switch int(msgTypeID) {
+	case 2:
+		return "Call"
+	case 3:
+		return "CallResult"
+	case 4:
+		return "CallError"
+	default:
+		return fmt.Sprintf("Unknown(%v)", msgTypeID)
+	}
+}
+
+func (pm *ProxyManager) LogTransactionCommand(chargePointID string, message []byte) {
+	var ocppMsg []interface{}
+	if err := json.Unmarshal(message, &ocppMsg); err != nil {
+		log.Printf("Error parsing transaction command: %v", err)
+		return
+	}
+
+	if len(ocppMsg) < 4 {
+		return
+	}
+
+	msgTypeID, ok := ocppMsg[0].(float64)
+	if !ok || msgTypeID != 2 {
+		return // Not a call message
+	}
+
+	action, ok := ocppMsg[2].(string)
+	if !ok {
+		return
+	}
+
+	// Only process transaction-related commands
+	if action != "RemoteStartTransaction" && action != "RemoteStopTransaction" {
+		return
+	}
+
+	payload, ok := ocppMsg[3].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	// Log detailed information
+	messageID, _ := ocppMsg[1].(string)
+	log.Printf("Transaction command for %s: Action=%s, MessageID=%s", chargePointID, action, messageID)
+
+	// Add specific handling based on command type
+	if action == "RemoteStartTransaction" {
+		idTag, _ := payload["idTag"].(string)
+		connectorID, hasConnector := payload["connectorId"].(float64)
+
+		if hasConnector {
+			log.Printf("  RemoteStart: idTag=%s, connectorId=%v", idTag, connectorID)
+		} else {
+			log.Printf("  RemoteStart: idTag=%s, no specific connector", idTag)
+		}
+
+		// Check if we already have a pending remote start
+		if pm.dbService != nil {
+			var connID int
+			if hasConnector {
+				connID = int(connectorID)
+			}
+
+			pending, err := pm.dbService.GetPendingRemoteStart(chargePointID, connID)
+			if err == nil && pending != nil {
+				log.Printf("  Found existing pending remote start: idTag=%s, completed=%v, expired=%v",
+					pending.IdTag, pending.Completed, pending.Expired)
+			}
+		}
+
+	} else if action == "RemoteStopTransaction" {
+		txID, hasTxID := payload["transactionId"].(float64)
+
+		if hasTxID {
+			log.Printf("  RemoteStop: transactionId=%v", txID)
+
+			// Look up transaction in database for additional info
+			if pm.dbService != nil {
+				tx, err := pm.dbService.GetTransaction(int(txID))
+				if err != nil {
+					log.Printf("  Warning: Transaction %v not found in database: %v", txID, err)
+
+					// Check for any incomplete transactions on this charge point
+					incTx, err := pm.dbService.GetIncompleteTransactions(chargePointID)
+					if err != nil {
+						log.Printf("  Error getting incomplete transactions: %v", err)
+					} else if len(incTx) > 0 {
+						log.Printf("  Found %d incomplete transactions for %s:", len(incTx), chargePointID)
+						for _, tx := range incTx {
+							log.Printf("    TransactionID=%d, ConnectorID=%d, IdTag=%s",
+								tx.TransactionID, tx.ConnectorID, tx.IdTag)
+						}
+					} else {
+						log.Printf("  No incomplete transactions found for charge point %s", chargePointID)
+					}
+
+				} else {
+					log.Printf("  Found transaction %v: CP=%s, Connector=%d, IdTag=%s, Complete=%v",
+						txID, tx.ChargePointID, tx.ConnectorID, tx.IdTag, tx.IsComplete)
+
+					// If transaction is for a different charge point, this could be a problem
+					if tx.ChargePointID != chargePointID {
+						log.Printf("  WARNING: Transaction %v belongs to charge point %s but command sent to %s",
+							txID, tx.ChargePointID, chargePointID)
+					}
+				}
+			}
+		} else {
+			log.Printf("  RemoteStop: No transactionId provided")
+		}
+	}
+}
+
 // handleProxyMessages processes messages coming from a proxy server
 func (pm *ProxyManager) handleProxyMessages(chargePointID string, destinationID uint, conn *websocket.Conn) {
 	defer func() {
@@ -159,6 +298,17 @@ func (pm *ProxyManager) handleProxyMessages(chargePointID string, destinationID 
 			log.Printf("Error reading from proxy: %v", err)
 			break
 		}
+
+		log.Printf("Received message from proxy for charge point %s: %s", chargePointID, string(message))
+
+		// Check if the charge point is connected before proceeding
+		if !pm.EnsureChargePointConnection(chargePointID) {
+			log.Printf("Will not forward message for charge point %s due to connection issues", chargePointID)
+			continue
+		}
+
+		// Log detailed information for transaction commands
+		pm.LogTransactionCommand(chargePointID, message)
 
 		// Log the received message
 		proxyLog := &database.ProxyMessageLog{
@@ -190,6 +340,8 @@ func (pm *ProxyManager) handleProxyMessages(chargePointID string, destinationID 
 		if wasModified {
 			proxyLog.WasModified = true
 			proxyLog.TransformedMessage = string(modifiedMessage)
+			log.Printf("Message was modified: Original: %s, Modified: %s",
+				string(message), string(modifiedMessage))
 		}
 
 		// Save the log
@@ -203,10 +355,18 @@ func (pm *ProxyManager) handleProxyMessages(chargePointID string, destinationID 
 			continue
 		}
 
+		// Attempt to forward the message
+		log.Printf("Attempting to forward message to charge point %s: %s",
+			chargePointID, string(modifiedMessage))
+
 		// Forward the message to the charge point if we have a central handler
 		if pm.centralHandler != nil {
+			log.Printf("Forwarding message of type: %s to charge point %s",
+				getMessageTypeLog(modifiedMessage), chargePointID)
+
 			if err := pm.centralHandler.ForwardMessageToChargePoint(chargePointID, modifiedMessage); err != nil {
-				log.Printf("Error forwarding message to charge point %s: %v", chargePointID, err)
+				log.Printf("Error forwarding message to charge point %s: %v (Message: %s)",
+					chargePointID, err, string(modifiedMessage))
 			} else {
 				log.Printf("Successfully forwarded message from proxy to charge point %s", chargePointID)
 			}

@@ -1165,14 +1165,64 @@ func (cs *CentralSystemHandlerWithDB) ForwardMessageToChargePoint(chargePointID 
 		return fmt.Errorf("charge point %s not connected", chargePointID)
 	}
 
+	// Log the raw message we're about to forward
+	if cs.dbLogger != nil {
+		if err := cs.dbLogger.LogRawMessage("SEND", chargePointID, message); err != nil {
+			log.Printf("Error logging raw forwarded message: %v", err)
+		}
+	}
+
 	// Forward the message
 	if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+		cs.logEvent(chargePointID, "ERROR", "Proxy",
+			fmt.Sprintf("Failed to forward message from proxy to charge point: %v", err))
 		return fmt.Errorf("failed to send message to charge point: %v", err)
 	}
 
-	// Log the event
+	// Log the successful forwarding
 	cs.logEvent(chargePointID, "INFO", "Proxy",
-		fmt.Sprintf("Forwarded message from proxy to charge point"))
+		fmt.Sprintf("Successfully forwarded message from proxy to charge point"))
 
 	return nil
+}
+
+// 3. Complete EnsureChargePointConnection implementation
+func (pm *ProxyManager) EnsureChargePointConnection(chargePointID string) bool {
+	if pm.centralHandler == nil {
+		log.Printf("No central handler available for charge point %s", chargePointID)
+		return false
+	}
+
+	// Check if the charge point is connected
+	pm.centralHandler.mutex.Lock()
+	conn, exists := pm.centralHandler.clients[chargePointID]
+	connected := exists && conn != nil
+	pm.centralHandler.mutex.Unlock()
+
+	if !connected {
+		log.Printf("Charge point %s is not connected in clients map", chargePointID)
+
+		// Check with database
+		cp, err := pm.dbService.GetChargePoint(chargePointID)
+		if err != nil {
+			log.Printf("Failed to get charge point %s from database: %v", chargePointID, err)
+			return false
+		}
+
+		if !cp.IsConnected {
+			log.Printf("Charge point %s is marked as disconnected in database", chargePointID)
+			return false
+		}
+
+		// Database says connected but our map doesn't have it
+		log.Printf("WARNING: Charge point %s is marked as connected in database but not in active connections", chargePointID)
+
+		// Add extra diagnostic info
+		lastHeartbeatDiff := time.Since(cp.LastHeartbeat)
+		log.Printf("Last heartbeat was %v ago for %s", lastHeartbeatDiff, chargePointID)
+
+		return false
+	}
+
+	return true
 }
