@@ -37,21 +37,9 @@ func main() {
 	log.Printf("OCPP server configured with host: %s, WebSocket port: %d, API port: %d",
 		ocppConfig.Host, ocppConfig.WebSocketPort, ocppConfig.APIPort)
 
-	// Initialize the proxy manager with database service
-	proxyManager := ocppserver.NewProxyManager(dbService)
-
-	centralHandler := ocppserver.NewCentralSystemHandlerWithDB(dbService, proxyManager)
-
-	proxyManager.SetCentralHandler(centralHandler)
-
-	// Create and register the ID transformer for handling ID transformations in proxied messages
-	idTransformer := ocppserver.NewIDTransformer(dbService, proxyManager)
-	proxyManager.RegisterMessageProcessor(idTransformer)
-
-	// Create central system handler with database integration and proxy manager
-	var handler = ocppserver.NewCentralSystemHandlerWithDB(dbService, proxyManager)
-	proxyManager.StartProxyHealthCheck()
-	log.Println("OCPP handler created with database integration and proxy support")
+	// Create central system handler with database integration
+	var handler = ocppserver.NewCentralSystemHandlerWithDB(dbService)
+	log.Println("OCPP handler created with database integration")
 
 	// Create and initialize OCPP server
 	ocppServer := ocppserver.NewOCPPServer(ocppConfig, handler)
@@ -79,30 +67,6 @@ func main() {
 	if err := apiServer.Start(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
-
-	// After the server has started, connect all currently connected charge points to proxies
-	go func() {
-		// Give the server a moment to fully initialize
-		time.Sleep(2 * time.Second)
-
-		// Get all connected charge points
-		connectedChargePoints, err := dbService.ListConnectedChargePoints()
-		if err != nil {
-			log.Printf("Error fetching connected charge points for proxy setup: %v", err)
-			return
-		}
-
-		log.Printf("Setting up proxy connections for %d connected charge points", len(connectedChargePoints))
-
-		// Connect each one to its configured proxies
-		for _, cp := range connectedChargePoints {
-			if err := proxyManager.ConnectToProxies(cp.ID); err != nil {
-				log.Printf("Error connecting charge point %s to proxies: %v", cp.ID, err)
-			} else {
-				log.Printf("Successfully connected charge point %s to proxies", cp.ID)
-			}
-		}
-	}()
 
 	// Wait a moment for server startup logs to complete
 	time.Sleep(100 * time.Millisecond)
@@ -154,44 +118,21 @@ func main() {
 	fmt.Printf("  POST %s/admin/close-transaction        - Administratively close a transaction\n", apiURL)
 	fmt.Printf("  GET  %s/reports/energy                 - Generate energy consumption report\n", apiURL)
 
-	// New proxy-related endpoints
-	fmt.Println("\nProxy System API endpoints:")
-	fmt.Printf("  POST     %s/proxy/connect                                           - Manually connect charge point\n", apiURL)
-	fmt.Printf("  GET     %s/proxy/destinations                                       - List all proxy destinations\n", apiURL)
-	fmt.Printf("  GET     %s/proxy/destinations?id=1                                  - Get details for a specific proxy destination\n", apiURL)
-	fmt.Printf("  POST    %s/proxy/destinations                                       - Create or update a proxy destination\n", apiURL)
-	fmt.Printf("  DELETE  %s/proxy/destinations?id=1                                  - Delete a proxy destination\n", apiURL)
-	fmt.Printf("  GET     %s/proxy/charge-points?chargePointId=CP001                  - Get proxy config for a charge point\n", apiURL)
-	fmt.Printf("  GET     %s/proxy/charge-points                                      - List all charge point proxy configurations\n", apiURL)
-	fmt.Printf("  POST    %s/proxy/charge-points                                      - Enable/disable proxying for a charge point\n", apiURL)
-	fmt.Printf("  GET     %s/proxy/mappings?chargePointId=CP001                       - List mappings for a charge point\n", apiURL)
-	fmt.Printf("  GET     %s/proxy/mappings                                           - List all proxy mappings\n", apiURL)
-	fmt.Printf("  POST    %s/proxy/mappings                                           - Create or update a mapping\n", apiURL)
-	fmt.Printf("  DELETE  %s/proxy/mappings?id=1                                      - Delete a mapping by ID\n", apiURL)
-	fmt.Printf("  DELETE  %s/proxy/mappings?chargePointId=CP001&proxyDestinationId=1  - Delete by charge point and destination\n", apiURL)
-	fmt.Printf("  GET     %s/proxy/logs?chargePointId=CP001&direction=TO_PROXY        - View proxy message logs\n", apiURL)
-
 	// Setup graceful shutdown
-	setupGracefulShutdown(apiServer, proxyManager)
+	setupGracefulShutdown(apiServer)
 
 	// Keep server running until terminated
 	apiServer.RunForever()
 }
 
 // setupGracefulShutdown configures graceful shutdown on system signals
-func setupGracefulShutdown(apiServer *server.APIServerWithDB, proxyManager *ocppserver.ProxyManager) {
+func setupGracefulShutdown(apiServer *server.APIServerWithDB) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-c
 		fmt.Println("\nShutting down OCPP server...")
-
-		// Disconnect all proxy connections
-		if proxyManager != nil {
-			log.Println("Disconnecting proxy connections...")
-			proxyManager.DisconnectAllProxies()
-		}
 
 		// Shutdown API server
 		apiServer.Shutdown()

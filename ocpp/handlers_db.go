@@ -25,11 +25,10 @@ type CentralSystemHandlerWithDB struct {
 	cmdMgrInit     sync.Once
 	dbLogger       *DatabaseMessageLogger
 	mutex          sync.Mutex
-	proxyManager   *ProxyManager
 }
 
 // NewCentralSystemHandlerWithDB creates a new handler with database integration
-func NewCentralSystemHandlerWithDB(dbService *database.Service, proxyManager *ProxyManager) *CentralSystemHandlerWithDB {
+func NewCentralSystemHandlerWithDB(dbService *database.Service) *CentralSystemHandlerWithDB {
 	// Create a database message logger
 	dbLogger := NewDatabaseMessageLogger(dbService)
 
@@ -41,732 +40,9 @@ func NewCentralSystemHandlerWithDB(dbService *database.Service, proxyManager *Pr
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 		},
-		clients:      make(map[string]*websocket.Conn),
-		dbService:    dbService,
-		dbLogger:     dbLogger, // Use the database logger
-		proxyManager: proxyManager,
-	}
-}
-
-// ServeHTTP implements the http.Handler interface
-func (cs *CentralSystemHandlerWithDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	cs.HandleWebSocket(w, r)
-}
-
-// HandleWebSocket handles WebSocket connections from charge points
-func (cs *CentralSystemHandlerWithDB) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := cs.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("Failed to upgrade connection: %v", err)
-		return
-	}
-
-	// Extract charge point ID from the URL path
-	chargePointID := extractChargePointIDFromURL(r.URL.Path)
-
-	// Log the new connection
-	cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("New connection established from %s", chargePointID))
-
-	// Update charge point connection status in the database
-	cs.updateChargePointConnection(chargePointID, true)
-
-	// Store the connection
-	cs.clients[chargePointID] = conn
-
-	// Handle incoming messages
-	go cs.handleMessagesWithDB(chargePointID, conn)
-}
-
-// extractChargePointIDFromURL extracts the charge point ID from the URL path
-func extractChargePointIDFromURL(path string) string {
-	// Extract chargePointID from URL path
-	chargePointID := strings.TrimPrefix(path, "/")
-	if strings.Contains(chargePointID, "/") {
-		parts := strings.Split(chargePointID, "/")
-		chargePointID = parts[0]
-	}
-	if chargePointID == "" {
-		chargePointID = "unknown"
-	}
-	return chargePointID
-}
-
-// handleMessagesWithDB handles messages with database integration
-func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string, conn *websocket.Conn) {
-	defer func() {
-		conn.Close()
-
-		// Remove from clients map using the CommandManager's locking
-		cmdMgr := cs.GetCommandManager()
-		if cmdMgr != nil {
-			cmdMgr.LockClients()
-			delete(cmdMgr.clients, chargePointID)
-			cmdMgr.UnlockClients()
-		}
-
-		// Update database to show charge point is disconnected
-		cp, err := cs.dbService.GetChargePoint(chargePointID)
-		if err == nil {
-			cp.IsConnected = false
-			cp.UpdatedAt = time.Now()
-			if err := cs.dbService.SaveChargePoint(cp); err != nil {
-				log.Printf("Error updating charge point connection status: %v", err)
-			}
-		}
-
-		// Check for incomplete transactions
-		incompleteTransactions, err := cs.dbService.GetIncompleteTransactions(chargePointID)
-		var incompleteCount = 0
-		if err == nil {
-			incompleteCount = len(incompleteTransactions)
-		}
-
-		// Log the disconnection
-		cs.logEvent(chargePointID, "INFO", "System",
-			fmt.Sprintf("Connection closed for %s. Incomplete transactions: %d",
-				chargePointID, incompleteCount))
-	}()
-
-	for {
-		// Read message
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Printf("Error reading message: %v", err)
-			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error reading message: %v", err))
-			break
-		}
-
-		// Log the raw incoming message
-		if cs.dbLogger != nil {
-			if err := cs.dbLogger.LogRawMessage("RECV", chargePointID, message); err != nil {
-				log.Printf("Error logging raw message: %v", err)
-			}
-		}
-
-		// Forward the message to any configured proxies
-		if cs.proxyManager != nil {
-			log.Printf("Forwarding message from %s to proxies", chargePointID)
-			cs.proxyManager.ForwardToProxies(chargePointID, message)
-		}
-
-		// Parse OCPP message
-		log.Printf("Received message from %s: %s", chargePointID, message)
-
-		// Parse the JSON array [MessageTypeId, UniqueId, Action, Payload]
-		var ocppMsg []interface{}
-		if err := json.Unmarshal(message, &ocppMsg); err != nil {
-			log.Printf("Error parsing OCPP message: %v", err)
-			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error parsing OCPP message: %v", err))
-			continue
-		}
-
-		// Check message format
-		if len(ocppMsg) < 3 {
-			log.Printf("Invalid OCPP message format: %s", message)
-			cs.logEvent(chargePointID, "ERROR", "System", "Invalid OCPP message format")
-			continue
-		}
-
-		// Message type (2 = Request, 3 = Response, 4 = Error)
-		msgTypeID, ok := ocppMsg[0].(float64)
-		if !ok {
-			log.Printf("Invalid message type ID: %v", ocppMsg[0])
-			continue
-		}
-
-		// Message unique ID
-		uniqueID, ok := ocppMsg[1].(string)
-		if !ok {
-			log.Printf("Invalid unique ID: %v", ocppMsg[1])
-			continue
-		}
-
-		// If it's a response (CallResult, msgTypeID == 3)
-		if msgTypeID == 3 {
-			// Process response to a command we sent
-			if len(ocppMsg) > 2 {
-				responsePayload, ok := ocppMsg[2].(map[string]interface{})
-				if !ok && ocppMsg[2] != nil {
-					log.Printf("Invalid response payload format: %v", ocppMsg[2])
-					continue
-				}
-
-				// Pass to command manager to handle
-				cs.GetCommandManager().HandleCommandResponse(uniqueID, responsePayload)
-
-				// ALSO check if this is a response to a proxy request and forward it
-				if cs.proxyManager != nil {
-					// Create the full response message
-					responseMsg, err := json.Marshal(ocppMsg)
-					if err != nil {
-						log.Printf("Error marshaling response message: %v", err)
-					} else {
-						// Forward to proxies to check for pending requests
-						log.Printf("Forwarding response to proxy manager: %s", string(responseMsg))
-						cs.proxyManager.ForwardToProxies(chargePointID, responseMsg)
-					}
-				}
-			}
-			continue
-		}
-
-		// If it's an error response (CallError, msgTypeID == 4)
-		if msgTypeID == 4 {
-			// Parse error details
-			if len(ocppMsg) >= 5 {
-				errorCode, _ := ocppMsg[2].(string)
-				errorDescription, _ := ocppMsg[3].(string)
-				errorDetails, _ := ocppMsg[4].(map[string]interface{})
-
-				log.Printf("Received error response: code=%s, description=%s, details=%v",
-					errorCode, errorDescription, errorDetails)
-
-				cs.logEvent(chargePointID, "ERROR", "ChargePoint",
-					fmt.Sprintf("Error response for message %s: %s - %s",
-						uniqueID, errorCode, errorDescription))
-
-				// ALSO check if this is a response to a proxy request and forward it
-				if cs.proxyManager != nil {
-					// Create the full error message
-					errorMsg, err := json.Marshal(ocppMsg)
-					if err != nil {
-						log.Printf("Error marshaling error message: %v", err)
-					} else {
-						// Forward to proxies to check for pending requests
-						log.Printf("Forwarding error to proxy manager: %s", string(errorMsg))
-						cs.proxyManager.ForwardToProxies(chargePointID, errorMsg)
-					}
-				}
-			}
-			continue
-		}
-
-		// If it's a request (msgTypeID == 2)
-		if msgTypeID == 2 {
-			action, ok := ocppMsg[2].(string)
-			if !ok {
-				log.Printf("Invalid action: %v", ocppMsg[2])
-				continue
-			}
-
-			// Handle different action types
-			var payload map[string]interface{}
-			var response interface{}
-
-			if len(ocppMsg) > 3 {
-				payload, ok = ocppMsg[3].(map[string]interface{})
-				if !ok {
-					log.Printf("Invalid payload format: %v", ocppMsg[3])
-					continue
-				}
-			}
-
-			// Log the incoming request
-			cs.logEvent(chargePointID, "INFO", "ChargePoint", fmt.Sprintf("Received %s request", action))
-
-			switch action {
-			case "BootNotification":
-				response = cs.handleBootNotificationRequestWithDB(chargePointID, payload)
-			case "Heartbeat":
-				response = cs.handleHeartbeatRequestWithDB(chargePointID)
-			case "Authorize":
-				response = cs.handleAuthorizeRequestWithDB(chargePointID, payload)
-			case "StatusNotification":
-				response = cs.handleStatusNotificationRequestWithDB(chargePointID, payload)
-			case "StartTransaction":
-				response = cs.handleStartTransactionRequestWithDB(chargePointID, payload)
-			case "StopTransaction":
-				response = cs.handleStopTransactionRequestWithDB(chargePointID, payload)
-			case "MeterValues":
-				response = cs.handleMeterValuesRequestWithDB(chargePointID, payload)
-			default:
-				log.Printf("Unsupported action: %s", action)
-				cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Unsupported action: %s", action))
-				response = map[string]interface{}{} // Empty response for unknown actions
-			}
-
-			// Send response back (CallResult)
-			callResult := []interface{}{3, uniqueID, response} // 3 = CallResult
-
-			// Log the outgoing response
-			responseJSON, err := json.Marshal(callResult)
-			if err == nil && cs.dbLogger != nil {
-				if err := cs.dbLogger.LogRawMessage("SEND", chargePointID, responseJSON); err != nil {
-					log.Printf("Error logging raw message: %v", err)
-				}
-			}
-
-			// Forward the response to proxies as well
-			if cs.proxyManager != nil {
-				log.Printf("Forwarding response from %s to proxies", chargePointID)
-				cs.proxyManager.ForwardToProxies(chargePointID, responseJSON)
-			}
-
-			if err := conn.WriteJSON(callResult); err != nil {
-				log.Printf("Error sending response: %v", err)
-				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error sending response: %v", err))
-			} else {
-				log.Printf("Sent response for %s: %+v", action, response)
-				cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("Sent response for %s", action))
-			}
-		} else {
-			log.Printf("Received non-request message type: %v", msgTypeID)
-		}
-	}
-}
-
-// logEvent logs an event to the database
-func (cs *CentralSystemHandlerWithDB) logEvent(chargePointID, level, source, message string) {
-	logEntry := &database.Log{
-		ChargePointID: chargePointID,
-		Timestamp:     time.Now(),
-		Level:         level,
-		Source:        source,
-		Message:       message,
-	}
-
-	if err := cs.dbService.AddLog(logEntry); err != nil {
-		log.Printf("Error saving log to database: %v", err)
-	}
-}
-
-// updateChargePointConnection updates the charge point connection status
-func (cs *CentralSystemHandlerWithDB) updateChargePointConnection(chargePointID string, isConnected bool) {
-	// Try to get existing charge point
-	cp, err := cs.dbService.GetChargePoint(chargePointID)
-	if err != nil {
-		// If not found, create a new one with minimal info
-		cp = &database.ChargePoint{
-			ID:          chargePointID,
-			Status:      "Unknown",
-			IsConnected: isConnected,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
-		}
-	} else {
-		// Update existing charge point
-		cp.IsConnected = isConnected
-		cp.UpdatedAt = time.Now()
-	}
-
-	if err := cs.dbService.SaveChargePoint(cp); err != nil {
-		log.Printf("Error updating charge point connection status: %v", err)
-	}
-}
-
-func (cs *CentralSystemHandlerWithDB) handlePendingTransactionsOnReconnect(chargePointID string) {
-	// Get all incomplete transactions for this charge point
-	incompleteTransactions, err := cs.dbService.GetIncompleteTransactions(chargePointID)
-	if err != nil {
-		cs.logEvent(chargePointID, "ERROR", "System",
-			fmt.Sprintf("Error checking for incomplete transactions: %v", err))
-		return
-	}
-
-	if len(incompleteTransactions) == 0 {
-		return
-	}
-
-	cs.logEvent(chargePointID, "INFO", "System",
-		fmt.Sprintf("Found %d incomplete transactions after reconnect", len(incompleteTransactions)))
-
-	// Request status update for all connectors
-	for _, tx := range incompleteTransactions {
-		connectorID := tx.ConnectorID
-
-		// Trigger a StatusNotification to get current connector status
-		_, err := cs.GetCommandManager().TriggerMessage(chargePointID, "StatusNotification", &connectorID)
-		if err != nil {
-			cs.logEvent(chargePointID, "ERROR", "System",
-				fmt.Sprintf("Failed to trigger StatusNotification for connector %d: %v", connectorID, err))
-		}
-
-		// Request latest meter values for this connector
-		_, err = cs.GetCommandManager().TriggerMessage(chargePointID, "MeterValues", &connectorID)
-		if err != nil {
-			cs.logEvent(chargePointID, "ERROR", "System",
-				fmt.Sprintf("Failed to trigger MeterValues for connector %d: %v", connectorID, err))
-		}
-	}
-}
-
-// handleBootNotificationRequestWithDB handles a BootNotification request with database integration
-func (cs *CentralSystemHandlerWithDB) handleBootNotificationRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
-	// Extract data from payload
-	chargePointModel, _ := payload["chargePointModel"].(string)
-	chargePointVendor, _ := payload["chargePointVendor"].(string)
-	serialNumber, _ := payload["chargePointSerialNumber"].(string)
-	firmwareVersion, _ := payload["firmwareVersion"].(string)
-
-	// Log the information
-	fmt.Printf("BootNotification from %s: Model=%s, Vendor=%s\n",
-		chargePointID, chargePointModel, chargePointVendor)
-
-	// Set default heartbeat interval
-	heartbeatInterval := 60 // Default to 60 seconds if not configured
-
-	// Get the heartbeat interval from config if available
-	// This could be from environment variables or other configuration sources
-	configHeartbeatInterval := cs.getConfiguredHeartbeatInterval()
-	if configHeartbeatInterval > 0 {
-		heartbeatInterval = configHeartbeatInterval
-	}
-
-	// Update or create charge point in database
-	now := time.Now()
-	cp, err := cs.dbService.GetChargePoint(chargePointID)
-
-	if err != nil {
-		// Create new charge point if not found
-		cp = &database.ChargePoint{
-			ID:                   chargePointID,
-			Model:                chargePointModel,
-			Vendor:               chargePointVendor,
-			SerialNumber:         serialNumber,
-			FirmwareVersion:      firmwareVersion,
-			Status:               "Available",
-			LastBootNotification: now,
-			LastHeartbeat:        now,
-			HeartbeatInterval:    heartbeatInterval, // Set the configured interval
-			IsConnected:          true,
-			CreatedAt:            now,
-			UpdatedAt:            now,
-		}
-	} else {
-		// Update existing charge point but preserve its heartbeat interval if set
-		// Only update from config if the existing value is 0 or invalid
-		if cp.HeartbeatInterval <= 0 {
-			cp.HeartbeatInterval = heartbeatInterval
-		}
-
-		cp.Model = chargePointModel
-		cp.Vendor = chargePointVendor
-		cp.SerialNumber = serialNumber
-		cp.FirmwareVersion = firmwareVersion
-		cp.LastBootNotification = now
-		cp.UpdatedAt = now
-		cp.IsConnected = true
-	}
-
-	if err := cs.dbService.SaveChargePoint(cp); err != nil {
-		log.Printf("Error saving charge point to database: %v", err)
-		cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error saving charge point to database: %v", err))
-	}
-
-	// Log the heartbeat interval that's being sent
-	log.Printf("Using heartbeat interval of %d seconds for charge point %s", cp.HeartbeatInterval, chargePointID)
-
-	// Check for incomplete transactions when a charge point reconnects
-	go cs.handlePendingTransactionsOnReconnect(chargePointID)
-
-	// Create response with the correct interval
-	return map[string]interface{}{
-		"currentTime": now.Format(time.RFC3339),
-		"interval":    cp.HeartbeatInterval,
-		"status":      "Accepted",
-	}
-}
-
-// getConfiguredHeartbeatInterval retrieves the heartbeat interval from configuration
-func (cs *CentralSystemHandlerWithDB) getConfiguredHeartbeatInterval() int {
-	// Get from environment variable if set
-	intervalStr := os.Getenv("OCPP_HEARTBEAT_INTERVAL")
-	if intervalStr != "" {
-		interval, err := strconv.Atoi(intervalStr)
-		if err == nil && interval > 0 {
-			return interval
-		}
-	}
-
-	// Could add additional sources like config files here
-
-	// Return default interval value
-	return 60 // Default to 60 seconds
-}
-
-// handleHeartbeatRequestWithDB handles a Heartbeat request with database integration
-// In your handleHeartbeatRequestWithDB function
-func (cs *CentralSystemHandlerWithDB) handleHeartbeatRequestWithDB(chargePointID string) map[string]interface{} {
-	fmt.Printf("Heartbeat from %s\n", chargePointID)
-
-	// Update charge point heartbeat time
-	now := time.Now()
-	cp, err := cs.dbService.GetChargePoint(chargePointID)
-	if err == nil {
-		cp.LastHeartbeat = now
-		cp.UpdatedAt = now
-		cp.IsConnected = true // Set to true whenever a heartbeat is received
-		if err := cs.dbService.SaveChargePoint(cp); err != nil {
-			log.Printf("Error updating charge point heartbeat: %v", err)
-			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error updating charge point heartbeat: %v", err))
-		}
-	} else {
-		log.Printf("Charge point not found for heartbeat: %s", chargePointID)
-		cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Charge point not found for heartbeat: %s", chargePointID))
-	}
-
-	// Create response
-	return map[string]interface{}{
-		"currentTime": now.Format(time.RFC3339),
-	}
-}
-
-// handleAuthorizeRequestWithDB handles an Authorize request with database integration
-func (cs *CentralSystemHandlerWithDB) handleAuthorizeRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
-	idTag, _ := payload["idTag"].(string)
-	fmt.Printf("Authorize request from %s: idTag=%s\n", chargePointID, idTag)
-
-	// Check if the ID tag is authorized
-	authStatus := "Accepted" // Default is to accept
-
-	auth, err := cs.dbService.GetAuthorization(idTag)
-	if err == nil {
-		// ID tag found in database
-		authStatus = auth.Status
-
-		// Check if expired
-		if auth.ExpiryDate.Before(time.Now()) && !auth.ExpiryDate.IsZero() {
-			authStatus = "Expired"
-			cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("Authorization expired for idTag: %s", idTag))
-		}
-	} else {
-		// ID tag not found, add it to database as accepted
-		auth = &database.Authorization{
-			IdTag:     idTag,
-			Status:    "Accepted",
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
-		if err := cs.dbService.SaveAuthorization(auth); err != nil {
-			log.Printf("Error saving authorization to database: %v", err)
-			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error saving authorization to database: %v", err))
-		}
-	}
-
-	// Log the authorization attempt
-	cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("Authorization attempt for idTag: %s, status: %s", idTag, authStatus))
-
-	// Create response
-	return map[string]interface{}{
-		"idTagInfo": map[string]interface{}{
-			"status": authStatus,
-		},
-	}
-}
-
-// handleStatusNotificationRequestWithDB handles a StatusNotification request with database integration
-func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
-	// Pull status information
-	status, _ := payload["status"].(string)
-	connectorIdFloat, _ := payload["connectorId"].(float64)
-	connectorId := int(connectorIdFloat)
-	errorCode, _ := payload["errorCode"].(string)
-
-	fmt.Printf("StatusNotification from %s: ConnectorId=%v, Status=%s, ErrorCode=%s\n",
-		chargePointID, connectorId, status, errorCode)
-
-	statusUpdated := false
-
-	// Update connector status in database
-	if connectorId == 0 {
-		// Connector 0 should be the Charge Point itself according to OCPP
-		cp, err := cs.dbService.GetChargePoint(chargePointID)
-		if err == nil {
-			cp.Status = status
-			cp.UpdatedAt = time.Now()
-			if err := cs.dbService.SaveChargePoint(cp); err != nil {
-				log.Printf("Error updating charge point status: %v", err)
-				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error updating charge point status: %v", err))
-			} else {
-				statusUpdated = true
-			}
-		} else {
-			log.Printf("Charge point not found for status update: %s", chargePointID)
-			cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Charge point not found for status update: %s", chargePointID))
-		}
-	} else {
-		// Update or create connector
-		connector, err := cs.dbService.GetConnector(chargePointID, connectorId)
-		if err != nil {
-			// Create new connector
-			connector = &database.Connector{
-				ChargePointID: chargePointID,
-				ConnectorID:   connectorId,
-				Status:        status,
-				ErrorCode:     errorCode,
-				UpdatedAt:     time.Now(),
-			}
-		} else {
-			// Update existing connector
-			connector.Status = status
-			connector.ErrorCode = errorCode
-			connector.UpdatedAt = time.Now()
-		}
-
-		if err := cs.dbService.SaveConnector(connector); err != nil {
-			log.Printf("Error saving connector status: %v", err)
-			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error saving connector status: %v", err))
-		} else {
-			// Now update the overall charge point status based on connector statuses
-			// Only do this if we didn't already update the status via connector 0
-			if !statusUpdated {
-				cs.updateChargePointStatusFromConnectors(chargePointID)
-			}
-		}
-	}
-
-	// Log status change
-	cs.logEvent(chargePointID, "INFO", "ChargePoint",
-		fmt.Sprintf("Status change for connector %d: %s, ErrorCode: %s", connectorId, status, errorCode))
-
-	// Detect charging connector without a transaction
-	if connectorId > 0 && status == "Charging" {
-		// Check if there's an active transaction for this connector
-		_, err := cs.dbService.GetActiveTransactionForConnector(chargePointID, connectorId)
-		if err != nil {
-			// No transaction exists for a charging connector
-			cs.handleUnexpectedChargingStatus(chargePointID, connectorId)
-		}
-	}
-
-	// Extra handling for statuses that indicates a complete transaction
-	if connectorId > 0 && (status == "Available" || status == "Faulted") {
-		// Check if there's an incomplete transaction for this connector
-		tx, err := cs.dbService.GetActiveTransactionForConnector(chargePointID, connectorId)
-		if err == nil && tx != nil {
-			// Connector is Available but there's an incomplete transaction
-			cs.logEvent(chargePointID, "WARNING", "System",
-				fmt.Sprintf("Connector %d is %s but has incomplete transaction %d. Will request meter values and close.",
-					connectorId, status, tx.TransactionID))
-
-			// Request final meter values for this transaction
-			_, err = cs.GetCommandManager().TriggerMessage(chargePointID, "MeterValues", &connectorId)
-			if err != nil {
-				cs.logEvent(chargePointID, "ERROR", "System",
-					fmt.Sprintf("Error requesting meter values for connector %d: %v", connectorId, err))
-			}
-
-			// Close transaction after meter values
-			go func(txID int) {
-				// Wait on meter values
-				time.Sleep(5 * time.Second)
-
-				// Get latest transaction details
-				updatedTx, err := cs.dbService.GetTransaction(txID)
-				if err != nil {
-					cs.logEvent(chargePointID, "ERROR", "System",
-						fmt.Sprintf("Could not retrieve transaction %d: %v", txID, err))
-					return
-				}
-
-				// Get latest meter values
-				meterValues, err := cs.dbService.GetLatestMeterValueForTransaction(txID)
-				if err != nil {
-					cs.logEvent(chargePointID, "WARNING", "System",
-						fmt.Sprintf("No meter values found for transaction %d. Using last known value.", txID))
-				}
-
-				// Close transaction
-				updatedTx.StopTimestamp = time.Now()
-				updatedTx.IsComplete = true
-
-				// Use latest meter values for MeterStop, if meter values are available
-				if meterValues != nil && len(meterValues) > 0 {
-					// Find latest Energy.Active.Import.Register value
-					var latestEnergyValue float64
-					for _, mv := range meterValues {
-						if mv.Measurand == "Energy.Active.Import.Register" {
-							latestEnergyValue = mv.Value
-						}
-					}
-
-					// Convert to Wh if necessary
-					if latestEnergyValue > 0 {
-						// Convert kWh to Wh if unit is kWh
-						if meterValues[0].Unit == "kWh" {
-							latestEnergyValue *= 1000
-						}
-						updatedTx.MeterStop = int(latestEnergyValue)
-						updatedTx.EnergyDelivered = float64(updatedTx.MeterStop-updatedTx.MeterStart) / 1000.0
-					}
-				}
-
-				updatedTx.StopReason = "PowerLoss"
-
-				if err := cs.dbService.UpdateTransaction(updatedTx); err != nil {
-					cs.logEvent(chargePointID, "ERROR", "System",
-						fmt.Sprintf("Error closing transaction %d: %v", txID, err))
-				} else {
-					cs.logEvent(chargePointID, "INFO", "System",
-						fmt.Sprintf("Successfully closed transaction %d after offline period. Energy delivered: %.2f kWh",
-							txID, updatedTx.EnergyDelivered))
-				}
-			}(tx.TransactionID)
-		}
-	}
-
-	// StatusNotification requires an empty response according to the OCPP specification
-	return map[string]interface{}{}
-}
-
-// Add this new helper method to CentralSystemHandlerWithDB
-func (cs *CentralSystemHandlerWithDB) updateChargePointStatusFromConnectors(chargePointID string) {
-	// Get all connectors for this charge point
-	connectors, err := cs.dbService.ListConnectors(chargePointID)
-	if err != nil || len(connectors) == 0 {
-		return
-	}
-
-	// Get the charge point
-	cp, err := cs.dbService.GetChargePoint(chargePointID)
-	if err != nil {
-		return
-	}
-
-	// Determine overall status based on connector statuses
-	// Priority: Charging > Preparing > Finishing > Reserved > Unavailable > Faulted > Available
-	overallStatus := "Available" // Default if nothing else applies
-
-	for _, connector := range connectors {
-		switch connector.Status {
-		case "Charging":
-			overallStatus = "Charging"
-			goto updateStatus // Highest priority, exit the loop
-		case "Preparing":
-			if overallStatus != "Charging" {
-				overallStatus = "Preparing"
-			}
-		case "Finishing":
-			if overallStatus != "Charging" && overallStatus != "Preparing" {
-				overallStatus = "Finishing"
-			}
-		case "Reserved":
-			if overallStatus == "Available" {
-				overallStatus = "Reserved"
-			}
-		case "Unavailable":
-			if overallStatus == "Available" || overallStatus == "Reserved" {
-				overallStatus = "Unavailable"
-			}
-		case "Faulted":
-			if overallStatus == "Available" {
-				overallStatus = "Faulted"
-			}
-		}
-	}
-
-updateStatus:
-	// Update charge point status if it has changed or is still "Unknown"
-	if cp.Status != overallStatus || cp.Status == "Unknown" {
-		cp.Status = overallStatus
-		cp.UpdatedAt = time.Now()
-		if err := cs.dbService.SaveChargePoint(cp); err != nil {
-			cs.logEvent(chargePointID, "ERROR", "System",
-				fmt.Sprintf("Error updating overall charge point status: %v", err))
-		} else {
-			cs.logEvent(chargePointID, "INFO", "System",
-				fmt.Sprintf("Updated overall charge point status to %s based on connector statuses", overallStatus))
-		}
+		clients:   make(map[string]*websocket.Conn),
+		dbService: dbService,
+		dbLogger:  dbLogger, // Use the database logger
 	}
 }
 
@@ -1149,106 +425,676 @@ func (cs *CentralSystemHandlerWithDB) handleUnexpectedChargingStatus(chargePoint
 	}
 }
 
-// GetProxyManager returns the proxy manager
-func (cs *CentralSystemHandlerWithDB) GetProxyManager() *ProxyManager {
-	return cs.proxyManager
+// ServeHTTP implements the http.Handler interface
+func (cs *CentralSystemHandlerWithDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cs.HandleWebSocket(w, r)
 }
 
-// SendMessageToChargePoint sends a raw message to a specific charge point
-func (cs *CentralSystemHandlerWithDB) SendMessageToChargePoint(chargePointID string, message []byte) error {
-	cs.mutex.Lock()
-	conn, exists := cs.clients[chargePointID]
-	cs.mutex.Unlock()
-
-	if !exists || conn == nil {
-		return fmt.Errorf("charge point %s is not connected", chargePointID)
+// HandleWebSocket handles WebSocket connections from charge points
+func (cs *CentralSystemHandlerWithDB) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := cs.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade connection: %v", err)
+		return
 	}
 
-	// Send the raw message
-	if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
-		return fmt.Errorf("failed to send message to charge point: %v", err)
-	}
+	// Extract charge point ID from the URL path
+	chargePointID := extractChargePointIDFromURL(r.URL.Path)
 
-	// Log that we forwarded a message
-	cs.logEvent(chargePointID, "INFO", "Proxy",
-		fmt.Sprintf("Forwarded message from proxy to charge point: %s", string(message)))
+	// Log the new connection
+	cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("New connection established from %s", chargePointID))
 
-	return nil
+	// Update charge point connection status in the database
+	cs.updateChargePointConnection(chargePointID, true)
+
+	// Store the connection
+	cs.clients[chargePointID] = conn
+
+	// Handle incoming messages
+	go cs.handleMessagesWithDB(chargePointID, conn)
 }
 
-func (pm *ProxyManager) SetCentralHandler(handler *CentralSystemHandlerWithDB) {
-	pm.centralHandler = handler
+// extractChargePointIDFromURL extracts the charge point ID from the URL path
+func extractChargePointIDFromURL(path string) string {
+	// Extract chargePointID from URL path
+	chargePointID := strings.TrimPrefix(path, "/")
+	if strings.Contains(chargePointID, "/") {
+		parts := strings.Split(chargePointID, "/")
+		chargePointID = parts[0]
+	}
+	if chargePointID == "" {
+		chargePointID = "unknown"
+	}
+	return chargePointID
 }
 
-// ForwardMessageToChargePoint sends a message directly to a charge point
-func (cs *CentralSystemHandlerWithDB) ForwardMessageToChargePoint(chargePointID string, message []byte) error {
-	// Get the connection for this charge point
-	cs.mutex.Lock()
-	conn, exists := cs.clients[chargePointID]
-	cs.mutex.Unlock()
+// handleMessagesWithDB handles messages with database integration
+func (cs *CentralSystemHandlerWithDB) handleMessagesWithDB(chargePointID string, conn *websocket.Conn) {
+	defer func() {
+		conn.Close()
 
-	if !exists || conn == nil {
-		return fmt.Errorf("charge point %s not connected", chargePointID)
-	}
-
-	// Log the raw message we're about to forward
-	if cs.dbLogger != nil {
-		if err := cs.dbLogger.LogRawMessage("SEND", chargePointID, message); err != nil {
-			log.Printf("Error logging raw forwarded message: %v", err)
-			// Continue anyway
+		// Remove from clients map using the CommandManager's locking
+		cmdMgr := cs.GetCommandManager()
+		if cmdMgr != nil {
+			cmdMgr.LockClients()
+			delete(cmdMgr.clients, chargePointID)
+			cmdMgr.UnlockClients()
 		}
-	}
 
-	// Forward the message directly without additional processing
-	if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
-		cs.logEvent(chargePointID, "ERROR", "Proxy",
-			fmt.Sprintf("Failed to forward message from proxy to charge point: %v", err))
-		return fmt.Errorf("failed to send message to charge point: %v", err)
-	}
+		// Update database to show charge point is disconnected
+		cp, err := cs.dbService.GetChargePoint(chargePointID)
+		if err == nil {
+			cp.IsConnected = false
+			cp.UpdatedAt = time.Now()
+			if err := cs.dbService.SaveChargePoint(cp); err != nil {
+				log.Printf("Error updating charge point connection status: %v", err)
+			}
+		}
 
-	cs.logEvent(chargePointID, "INFO", "Proxy",
-		"Successfully forwarded message from proxy to charge point")
+		// Check for incomplete transactions
+		incompleteTransactions, err := cs.dbService.GetIncompleteTransactions(chargePointID)
+		var incompleteCount = 0
+		if err == nil {
+			incompleteCount = len(incompleteTransactions)
+		}
 
-	return nil
-}
+		// Log the disconnection
+		cs.logEvent(chargePointID, "INFO", "System",
+			fmt.Sprintf("Connection closed for %s. Incomplete transactions: %d",
+				chargePointID, incompleteCount))
+	}()
 
-// 3. Complete EnsureChargePointConnection implementation
-func (pm *ProxyManager) EnsureChargePointConnection(chargePointID string) bool {
-	if pm.centralHandler == nil {
-		log.Printf("No central handler available for charge point %s", chargePointID)
-		return false
-	}
-
-	// Check if the charge point is connected
-	pm.centralHandler.mutex.Lock()
-	conn, exists := pm.centralHandler.clients[chargePointID]
-	connected := exists && conn != nil
-	pm.centralHandler.mutex.Unlock()
-
-	if !connected {
-		log.Printf("Charge point %s is not connected in clients map", chargePointID)
-
-		// Check with database
-		cp, err := pm.dbService.GetChargePoint(chargePointID)
+	for {
+		// Read message
+		_, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("Failed to get charge point %s from database: %v", chargePointID, err)
-			return false
+			log.Printf("Error reading message: %v", err)
+			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error reading message: %v", err))
+			break
 		}
 
-		if !cp.IsConnected {
-			log.Printf("Charge point %s is marked as disconnected in database", chargePointID)
-			return false
+		// Log the raw incoming message
+		if cs.dbLogger != nil {
+			if err := cs.dbLogger.LogRawMessage("RECV", chargePointID, message); err != nil {
+				log.Printf("Error logging raw message: %v", err)
+			}
 		}
 
-		// Database says connected but our map doesn't have it
-		log.Printf("WARNING: Charge point %s is marked as connected in database but not in active connections", chargePointID)
+		// Parse OCPP message
+		log.Printf("Received message from %s: %s", chargePointID, message)
 
-		// Add extra diagnostic info
-		lastHeartbeatDiff := time.Since(cp.LastHeartbeat)
-		log.Printf("Last heartbeat was %v ago for %s", lastHeartbeatDiff, chargePointID)
+		// Parse the JSON array [MessageTypeId, UniqueId, Action, Payload]
+		var ocppMsg []interface{}
+		if err := json.Unmarshal(message, &ocppMsg); err != nil {
+			log.Printf("Error parsing OCPP message: %v", err)
+			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error parsing OCPP message: %v", err))
+			continue
+		}
 
-		return false
+		// Check message format
+		if len(ocppMsg) < 3 {
+			log.Printf("Invalid OCPP message format: %s", message)
+			cs.logEvent(chargePointID, "ERROR", "System", "Invalid OCPP message format")
+			continue
+		}
+
+		// Message type (2 = Request, 3 = Response, 4 = Error)
+		msgTypeID, ok := ocppMsg[0].(float64)
+		if !ok {
+			log.Printf("Invalid message type ID: %v", ocppMsg[0])
+			continue
+		}
+
+		// Message unique ID
+		uniqueID, ok := ocppMsg[1].(string)
+		if !ok {
+			log.Printf("Invalid unique ID: %v", ocppMsg[1])
+			continue
+		}
+
+		// If it's a response (CallResult, msgTypeID == 3)
+		if msgTypeID == 3 {
+			// Process response to a command we sent
+			if len(ocppMsg) > 2 {
+				responsePayload, ok := ocppMsg[2].(map[string]interface{})
+				if !ok && ocppMsg[2] != nil {
+					log.Printf("Invalid response payload format: %v", ocppMsg[2])
+					continue
+				}
+
+				// Pass to command manager to handle
+				cs.GetCommandManager().HandleCommandResponse(uniqueID, responsePayload)
+			}
+			continue
+		}
+
+		// If it's an error response (CallError, msgTypeID == 4)
+		if msgTypeID == 4 {
+			// Parse error details
+			if len(ocppMsg) >= 5 {
+				errorCode, _ := ocppMsg[2].(string)
+				errorDescription, _ := ocppMsg[3].(string)
+				errorDetails, _ := ocppMsg[4].(map[string]interface{})
+
+				log.Printf("Received error response: code=%s, description=%s, details=%v",
+					errorCode, errorDescription, errorDetails)
+
+				cs.logEvent(chargePointID, "ERROR", "ChargePoint",
+					fmt.Sprintf("Error response for message %s: %s - %s",
+						uniqueID, errorCode, errorDescription))
+			}
+			continue
+		}
+
+		// If it's a request (msgTypeID == 2)
+		if msgTypeID == 2 {
+			action, ok := ocppMsg[2].(string)
+			if !ok {
+				log.Printf("Invalid action: %v", ocppMsg[2])
+				continue
+			}
+
+			// Handle different action types
+			var payload map[string]interface{}
+			var response interface{}
+
+			if len(ocppMsg) > 3 {
+				payload, ok = ocppMsg[3].(map[string]interface{})
+				if !ok {
+					log.Printf("Invalid payload format: %v", ocppMsg[3])
+					continue
+				}
+			}
+
+			// Log the incoming request
+			cs.logEvent(chargePointID, "INFO", "ChargePoint", fmt.Sprintf("Received %s request", action))
+
+			switch action {
+			case "BootNotification":
+				response = cs.handleBootNotificationRequestWithDB(chargePointID, payload)
+			case "Heartbeat":
+				response = cs.handleHeartbeatRequestWithDB(chargePointID)
+			case "Authorize":
+				response = cs.handleAuthorizeRequestWithDB(chargePointID, payload)
+			case "StatusNotification":
+				response = cs.handleStatusNotificationRequestWithDB(chargePointID, payload)
+			case "StartTransaction":
+				response = cs.handleStartTransactionRequestWithDB(chargePointID, payload)
+			case "StopTransaction":
+				response = cs.handleStopTransactionRequestWithDB(chargePointID, payload)
+			case "MeterValues":
+				response = cs.handleMeterValuesRequestWithDB(chargePointID, payload)
+			default:
+				log.Printf("Unsupported action: %s", action)
+				cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Unsupported action: %s", action))
+				response = map[string]interface{}{} // Empty response for unknown actions
+			}
+
+			// Send response back (CallResult)
+			callResult := []interface{}{3, uniqueID, response} // 3 = CallResult
+
+			// Log the outgoing response
+			responseJSON, err := json.Marshal(callResult)
+			if err == nil && cs.dbLogger != nil {
+				if err := cs.dbLogger.LogRawMessage("SEND", chargePointID, responseJSON); err != nil {
+					log.Printf("Error logging raw message: %v", err)
+				}
+			}
+
+			if err := conn.WriteJSON(callResult); err != nil {
+				log.Printf("Error sending response: %v", err)
+				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error sending response: %v", err))
+			} else {
+				log.Printf("Sent response for %s: %+v", action, response)
+				cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("Sent response for %s", action))
+			}
+		} else {
+			log.Printf("Received non-request message type: %v", msgTypeID)
+		}
+	}
+}
+
+// logEvent logs an event to the database
+func (cs *CentralSystemHandlerWithDB) logEvent(chargePointID, level, source, message string) {
+	logEntry := &database.Log{
+		ChargePointID: chargePointID,
+		Timestamp:     time.Now(),
+		Level:         level,
+		Source:        source,
+		Message:       message,
 	}
 
-	return true
+	if err := cs.dbService.AddLog(logEntry); err != nil {
+		log.Printf("Error saving log to database: %v", err)
+	}
+}
+
+// updateChargePointConnection updates the charge point connection status
+func (cs *CentralSystemHandlerWithDB) updateChargePointConnection(chargePointID string, isConnected bool) {
+	// Try to get existing charge point
+	cp, err := cs.dbService.GetChargePoint(chargePointID)
+	if err != nil {
+		// If not found, create a new one with minimal info
+		cp = &database.ChargePoint{
+			ID:          chargePointID,
+			Status:      "Unknown",
+			IsConnected: isConnected,
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+	} else {
+		// Update existing charge point
+		cp.IsConnected = isConnected
+		cp.UpdatedAt = time.Now()
+	}
+
+	if err := cs.dbService.SaveChargePoint(cp); err != nil {
+		log.Printf("Error updating charge point connection status: %v", err)
+	}
+}
+
+func (cs *CentralSystemHandlerWithDB) handlePendingTransactionsOnReconnect(chargePointID string) {
+	// Get all incomplete transactions for this charge point
+	incompleteTransactions, err := cs.dbService.GetIncompleteTransactions(chargePointID)
+	if err != nil {
+		cs.logEvent(chargePointID, "ERROR", "System",
+			fmt.Sprintf("Error checking for incomplete transactions: %v", err))
+		return
+	}
+
+	if len(incompleteTransactions) == 0 {
+		return
+	}
+
+	cs.logEvent(chargePointID, "INFO", "System",
+		fmt.Sprintf("Found %d incomplete transactions after reconnect", len(incompleteTransactions)))
+
+	// Request status update for all connectors
+	for _, tx := range incompleteTransactions {
+		connectorID := tx.ConnectorID
+
+		// Trigger a StatusNotification to get current connector status
+		_, err := cs.GetCommandManager().TriggerMessage(chargePointID, "StatusNotification", &connectorID)
+		if err != nil {
+			cs.logEvent(chargePointID, "ERROR", "System",
+				fmt.Sprintf("Failed to trigger StatusNotification for connector %d: %v", connectorID, err))
+		}
+
+		// Request latest meter values for this connector
+		_, err = cs.GetCommandManager().TriggerMessage(chargePointID, "MeterValues", &connectorID)
+		if err != nil {
+			cs.logEvent(chargePointID, "ERROR", "System",
+				fmt.Sprintf("Failed to trigger MeterValues for connector %d: %v", connectorID, err))
+		}
+	}
+}
+
+// handleBootNotificationRequestWithDB handles a BootNotification request with database integration
+func (cs *CentralSystemHandlerWithDB) handleBootNotificationRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	// Extract data from payload
+	chargePointModel, _ := payload["chargePointModel"].(string)
+	chargePointVendor, _ := payload["chargePointVendor"].(string)
+	serialNumber, _ := payload["chargePointSerialNumber"].(string)
+	firmwareVersion, _ := payload["firmwareVersion"].(string)
+
+	// Log the information
+	fmt.Printf("BootNotification from %s: Model=%s, Vendor=%s\n",
+		chargePointID, chargePointModel, chargePointVendor)
+
+	// Set default heartbeat interval
+	heartbeatInterval := 60 // Default to 60 seconds if not configured
+
+	// Get the heartbeat interval from config if available
+	// This could be from environment variables or other configuration sources
+	configHeartbeatInterval := cs.getConfiguredHeartbeatInterval()
+	if configHeartbeatInterval > 0 {
+		heartbeatInterval = configHeartbeatInterval
+	}
+
+	// Update or create charge point in database
+	now := time.Now()
+	cp, err := cs.dbService.GetChargePoint(chargePointID)
+
+	if err != nil {
+		// Create new charge point if not found
+		cp = &database.ChargePoint{
+			ID:                   chargePointID,
+			Model:                chargePointModel,
+			Vendor:               chargePointVendor,
+			SerialNumber:         serialNumber,
+			FirmwareVersion:      firmwareVersion,
+			Status:               "Available",
+			LastBootNotification: now,
+			LastHeartbeat:        now,
+			HeartbeatInterval:    heartbeatInterval, // Set the configured interval
+			IsConnected:          true,
+			CreatedAt:            now,
+			UpdatedAt:            now,
+		}
+	} else {
+		// Update existing charge point but preserve its heartbeat interval if set
+		// Only update from config if the existing value is 0 or invalid
+		if cp.HeartbeatInterval <= 0 {
+			cp.HeartbeatInterval = heartbeatInterval
+		}
+
+		cp.Model = chargePointModel
+		cp.Vendor = chargePointVendor
+		cp.SerialNumber = serialNumber
+		cp.FirmwareVersion = firmwareVersion
+		cp.LastBootNotification = now
+		cp.UpdatedAt = now
+		cp.IsConnected = true
+	}
+
+	if err := cs.dbService.SaveChargePoint(cp); err != nil {
+		log.Printf("Error saving charge point to database: %v", err)
+		cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error saving charge point to database: %v", err))
+	}
+
+	// Log the heartbeat interval that's being sent
+	log.Printf("Using heartbeat interval of %d seconds for charge point %s", cp.HeartbeatInterval, chargePointID)
+
+	// Check for incomplete transactions when a charge point reconnects
+	go cs.handlePendingTransactionsOnReconnect(chargePointID)
+
+	// Create response with the correct interval
+	return map[string]interface{}{
+		"currentTime": now.Format(time.RFC3339),
+		"interval":    cp.HeartbeatInterval,
+		"status":      "Accepted",
+	}
+}
+
+// getConfiguredHeartbeatInterval retrieves the heartbeat interval from configuration
+func (cs *CentralSystemHandlerWithDB) getConfiguredHeartbeatInterval() int {
+	// Get from environment variable if set
+	intervalStr := os.Getenv("OCPP_HEARTBEAT_INTERVAL")
+	if intervalStr != "" {
+		interval, err := strconv.Atoi(intervalStr)
+		if err == nil && interval > 0 {
+			return interval
+		}
+	}
+
+	// Could add additional sources like config files here
+
+	// Return default interval value
+	return 60 // Default to 60 seconds
+}
+
+// handleHeartbeatRequestWithDB handles a Heartbeat request with database integration
+func (cs *CentralSystemHandlerWithDB) handleHeartbeatRequestWithDB(chargePointID string) map[string]interface{} {
+	fmt.Printf("Heartbeat from %s\n", chargePointID)
+
+	// Update charge point heartbeat time
+	now := time.Now()
+	cp, err := cs.dbService.GetChargePoint(chargePointID)
+	if err == nil {
+		cp.LastHeartbeat = now
+		cp.UpdatedAt = now
+		cp.IsConnected = true // Set to true whenever a heartbeat is received
+		if err := cs.dbService.SaveChargePoint(cp); err != nil {
+			log.Printf("Error updating charge point heartbeat: %v", err)
+			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error updating charge point heartbeat: %v", err))
+		}
+	} else {
+		log.Printf("Charge point not found for heartbeat: %s", chargePointID)
+		cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Charge point not found for heartbeat: %s", chargePointID))
+	}
+
+	// Create response
+	return map[string]interface{}{
+		"currentTime": now.Format(time.RFC3339),
+	}
+}
+
+// handleAuthorizeRequestWithDB handles an Authorize request with database integration
+func (cs *CentralSystemHandlerWithDB) handleAuthorizeRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	idTag, _ := payload["idTag"].(string)
+	fmt.Printf("Authorize request from %s: idTag=%s\n", chargePointID, idTag)
+
+	// Check if the ID tag is authorized
+	authStatus := "Accepted" // Default is to accept
+
+	auth, err := cs.dbService.GetAuthorization(idTag)
+	if err == nil {
+		// ID tag found in database
+		authStatus = auth.Status
+
+		// Check if expired
+		if auth.ExpiryDate.Before(time.Now()) && !auth.ExpiryDate.IsZero() {
+			authStatus = "Expired"
+			cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("Authorization expired for idTag: %s", idTag))
+		}
+	} else {
+		// ID tag not found, add it to database as accepted
+		auth = &database.Authorization{
+			IdTag:     idTag,
+			Status:    "Accepted",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		if err := cs.dbService.SaveAuthorization(auth); err != nil {
+			log.Printf("Error saving authorization to database: %v", err)
+			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error saving authorization to database: %v", err))
+		}
+	}
+
+	// Log the authorization attempt
+	cs.logEvent(chargePointID, "INFO", "System", fmt.Sprintf("Authorization attempt for idTag: %s, status: %s", idTag, authStatus))
+
+	// Create response
+	return map[string]interface{}{
+		"idTagInfo": map[string]interface{}{
+			"status": authStatus,
+		},
+	}
+}
+
+// handleStatusNotificationRequestWithDB handles a StatusNotification request with database integration
+func (cs *CentralSystemHandlerWithDB) handleStatusNotificationRequestWithDB(chargePointID string, payload map[string]interface{}) map[string]interface{} {
+	// Pull status information
+	status, _ := payload["status"].(string)
+	connectorIdFloat, _ := payload["connectorId"].(float64)
+	connectorId := int(connectorIdFloat)
+	errorCode, _ := payload["errorCode"].(string)
+
+	fmt.Printf("StatusNotification from %s: ConnectorId=%v, Status=%s, ErrorCode=%s\n",
+		chargePointID, connectorId, status, errorCode)
+
+	statusUpdated := false
+
+	// Update connector status in database
+	if connectorId == 0 {
+		// Connector 0 should be the Charge Point itself according to OCPP
+		cp, err := cs.dbService.GetChargePoint(chargePointID)
+		if err == nil {
+			cp.Status = status
+			cp.UpdatedAt = time.Now()
+			if err := cs.dbService.SaveChargePoint(cp); err != nil {
+				log.Printf("Error updating charge point status: %v", err)
+				cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error updating charge point status: %v", err))
+			} else {
+				statusUpdated = true
+			}
+		} else {
+			log.Printf("Charge point not found for status update: %s", chargePointID)
+			cs.logEvent(chargePointID, "WARNING", "System", fmt.Sprintf("Charge point not found for status update: %s", chargePointID))
+		}
+	} else {
+		// Update or create connector
+		connector, err := cs.dbService.GetConnector(chargePointID, connectorId)
+		if err != nil {
+			// Create new connector
+			connector = &database.Connector{
+				ChargePointID: chargePointID,
+				ConnectorID:   connectorId,
+				Status:        status,
+				ErrorCode:     errorCode,
+				UpdatedAt:     time.Now(),
+			}
+		} else {
+			// Update existing connector
+			connector.Status = status
+			connector.ErrorCode = errorCode
+			connector.UpdatedAt = time.Now()
+		}
+
+		if err := cs.dbService.SaveConnector(connector); err != nil {
+			log.Printf("Error saving connector status: %v", err)
+			cs.logEvent(chargePointID, "ERROR", "System", fmt.Sprintf("Error saving connector status: %v", err))
+		} else {
+			// Now update the overall charge point status based on connector statuses
+			// Only do this if we didn't already update the status via connector 0
+			if !statusUpdated {
+				// Get all connectors for this charge point
+				connectors, err := cs.dbService.ListConnectors(chargePointID)
+				if err == nil && len(connectors) > 0 {
+					// Get the charge point
+					cp, err := cs.dbService.GetChargePoint(chargePointID)
+					if err == nil {
+						// Determine overall status based on connector statuses
+						// Priority: Charging > Preparing > Finishing > Reserved > Unavailable > Faulted > Available
+						overallStatus := "Available" // Default if nothing else applies
+
+						for _, connector := range connectors {
+							switch connector.Status {
+							case "Charging":
+								overallStatus = "Charging"
+								goto updateChargePointStatus // Highest priority, exit the loop
+							case "Preparing":
+								if overallStatus != "Charging" {
+									overallStatus = "Preparing"
+								}
+							case "Finishing":
+								if overallStatus != "Charging" && overallStatus != "Preparing" {
+									overallStatus = "Finishing"
+								}
+							case "Reserved":
+								if overallStatus == "Available" {
+									overallStatus = "Reserved"
+								}
+							case "Unavailable":
+								if overallStatus == "Available" || overallStatus == "Reserved" {
+									overallStatus = "Unavailable"
+								}
+							case "Faulted":
+								if overallStatus == "Available" {
+									overallStatus = "Faulted"
+								}
+							}
+						}
+
+					updateChargePointStatus:
+						// Update charge point status if it has changed or is still "Unknown"
+						if cp.Status != overallStatus || cp.Status == "Unknown" {
+							cp.Status = overallStatus
+							cp.UpdatedAt = time.Now()
+							if err := cs.dbService.SaveChargePoint(cp); err != nil {
+								cs.logEvent(chargePointID, "ERROR", "System",
+									fmt.Sprintf("Error updating overall charge point status: %v", err))
+							} else {
+								cs.logEvent(chargePointID, "INFO", "System",
+									fmt.Sprintf("Updated overall charge point status to %s based on connector statuses", overallStatus))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Log status change
+	cs.logEvent(chargePointID, "INFO", "ChargePoint",
+		fmt.Sprintf("Status change for connector %d: %s, ErrorCode: %s", connectorId, status, errorCode))
+
+	// Detect charging connector without a transaction
+	if connectorId > 0 && status == "Charging" {
+		// Check if there's an active transaction for this connector
+		_, err := cs.dbService.GetActiveTransactionForConnector(chargePointID, connectorId)
+		if err != nil {
+			// No transaction exists for a charging connector
+			cs.handleUnexpectedChargingStatus(chargePointID, connectorId)
+		}
+	}
+
+	// Extra handling for statuses that indicates a complete transaction
+	if connectorId > 0 && (status == "Available" || status == "Faulted") {
+		// Check if there's an incomplete transaction for this connector
+		tx, err := cs.dbService.GetActiveTransactionForConnector(chargePointID, connectorId)
+		if err == nil && tx != nil {
+			// Connector is Available but there's an incomplete transaction
+			cs.logEvent(chargePointID, "WARNING", "System",
+				fmt.Sprintf("Connector %d is %s but has incomplete transaction %d. Will request meter values and close.",
+					connectorId, status, tx.TransactionID))
+
+			// Request final meter values for this transaction
+			_, err = cs.GetCommandManager().TriggerMessage(chargePointID, "MeterValues", &connectorId)
+			if err != nil {
+				cs.logEvent(chargePointID, "ERROR", "System",
+					fmt.Sprintf("Error requesting meter values for connector %d: %v", connectorId, err))
+			}
+
+			// Close transaction after meter values
+			go func(txID int) {
+				// Wait on meter values
+				time.Sleep(5 * time.Second)
+
+				// Get latest transaction details
+				updatedTx, err := cs.dbService.GetTransaction(txID)
+				if err != nil {
+					cs.logEvent(chargePointID, "ERROR", "System",
+						fmt.Sprintf("Could not retrieve transaction %d: %v", txID, err))
+					return
+				}
+
+				// Get latest meter values
+				meterValues, err := cs.dbService.GetLatestMeterValueForTransaction(txID)
+				if err != nil {
+					cs.logEvent(chargePointID, "WARNING", "System",
+						fmt.Sprintf("No meter values found for transaction %d. Using last known value.", txID))
+				}
+
+				// Close transaction
+				updatedTx.StopTimestamp = time.Now()
+				updatedTx.IsComplete = true
+
+				// Use latest meter values for MeterStop, if meter values are available
+				if meterValues != nil && len(meterValues) > 0 {
+					// Find latest Energy.Active.Import.Register value
+					var latestEnergyValue float64
+					for _, mv := range meterValues {
+						if mv.Measurand == "Energy.Active.Import.Register" {
+							latestEnergyValue = mv.Value
+						}
+					}
+
+					// Convert to Wh if necessary
+					if latestEnergyValue > 0 {
+						// Convert kWh to Wh if unit is kWh
+						if meterValues[0].Unit == "kWh" {
+							latestEnergyValue *= 1000
+						}
+						updatedTx.MeterStop = int(latestEnergyValue)
+						updatedTx.EnergyDelivered = float64(updatedTx.MeterStop-updatedTx.MeterStart) / 1000.0
+					}
+				}
+
+				updatedTx.StopReason = "PowerLoss"
+
+				if err := cs.dbService.UpdateTransaction(updatedTx); err != nil {
+					cs.logEvent(chargePointID, "ERROR", "System",
+						fmt.Sprintf("Error closing transaction %d: %v", txID, err))
+				} else {
+					cs.logEvent(chargePointID, "INFO", "System",
+						fmt.Sprintf("Successfully closed transaction %d after offline period. Energy delivered: %.2f kWh",
+							txID, updatedTx.EnergyDelivered))
+				}
+			}(tx.TransactionID)
+		}
+	}
+
+	// StatusNotification requires an empty response according to the OCPP specification
+	return map[string]interface{}{}
 }
